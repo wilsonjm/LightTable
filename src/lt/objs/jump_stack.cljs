@@ -1,4 +1,5 @@
 (ns lt.objs.jump-stack
+  "Provide jump stack to jump to definitions and jump back"
   (:require [lt.object :as object]
             [lt.objs.editor :as editor]
             [lt.objs.editor.pool :as pool]
@@ -15,26 +16,26 @@
     (editor/center-cursor cur)))
 
 (behavior ::jump-stack.push
-           :triggers #{:jump-stack.push!}
-           :reaction (fn [jump-stack editor file pos]
-                       (let [old-file (:path (:info @editor))
-                             old-pos (editor/->cursor (lt.objs.editor.pool/last-active))]
-                         (if-not (files/exists? file)
-                           (notifos/set-msg! (str "Could not find file: " file) {:class "error"})
-                           (do (jump-to file pos)
-                             (object/update! jump-stack [:stack] conj [old-file old-pos]))))))
+          :triggers #{:jump-stack.push!}
+          :reaction (fn [jump-stack editor file pos]
+                      (let [old-file (:path (:info @editor))
+                            old-pos (editor/->cursor editor)]
+                        (if-not (files/exists? file)
+                          (notifos/set-msg! (str "Could not find file: " file) {:class "error"})
+                          (do (jump-to file pos)
+                            (object/update! jump-stack [:stack] conj [old-file old-pos]))))))
 
 (behavior ::jump-stack.pop
-           :triggers #{:jump-stack.pop!}
-           :reaction (fn [jump-stack file pos]
-                       (let [stack (:stack @jump-stack)]
-                         (if (empty? stack)
-                           (notifos/set-msg! "Nowhere left to jump" {:class "error"})
-                           (let [[file pos] (last stack)]
-                             (if-not (files/exists? file)
-                               (notifos/set-msg! (str "Could not find file: " file) {:class "error"})
-                               (do (jump-to file pos)
-                                 (object/update! jump-stack [:stack] pop))))))))
+          :triggers #{:jump-stack.pop!}
+          :reaction (fn [jump-stack file pos]
+                      (let [stack (:stack @jump-stack)]
+                        (if (empty? stack)
+                          (notifos/set-msg! "Nowhere left to jump" {:class "error"})
+                          (let [[file pos] (last stack)]
+                            (if-not (files/exists? file)
+                              (notifos/set-msg! (str "Could not find file: " file) {:class "error"})
+                              (do (jump-to file pos)
+                                (object/update! jump-stack [:stack] pop))))))))
 
 
 (def jump-stack (object/create (object/object* ::jump-stack
@@ -59,4 +60,5 @@
   :desc "Editor: Jump to file/pos"
   :hidden true
   :exec (fn [file pos]
-          (jump-to file pos))})
+          (when-let [ed (lt.objs.editor.pool/last-active)]
+            (object/raise jump-stack :jump-stack.push! ed file pos)))})

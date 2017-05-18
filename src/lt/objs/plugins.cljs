@@ -1,4 +1,6 @@
 (ns lt.objs.plugins
+  "Provide plugin manager with ability to search, install (download and unpack),
+  remove and update plguins"
   (:require [lt.object :as object]
             [lt.objs.command :as cmd]
             [lt.objs.context :as ctx]
@@ -11,6 +13,8 @@
             [lt.objs.deploy :as deploy]
             [lt.objs.notifos :as notifos]
             [lt.objs.tabs :as tabs]
+            [lt.util.js :refer [wait]]
+            [lt.objs.platform :as platform]
             [cljs.reader :as reader]
             [fetch.core :as fetch]
             [crate.core :as crate]
@@ -18,6 +22,7 @@
             [lt.util.kahn :as kahn]
             [lt.util.load :as load]
             [lt.util.dom :as dom]
+            [clojure.set :as set]
             [clojure.string :as string]
             [clojure.walk :as walk])
   (:require-macros [lt.macros :refer [behavior defui]]))
@@ -25,8 +30,9 @@
 
 (def plugins-dir (files/lt-home "plugins"))
 (def user-plugins-dir (files/lt-user-dir "plugins"))
-(def plugins-url "http://plugins.lighttable.com")
 (def ^:dynamic *plugin-dir* nil)
+
+(declare manager)
 
 (defn EOF-read [s]
   (when (and s
@@ -69,66 +75,91 @@
                       (when-let [ed (pool/last-active)]
                         (object/raise ed :build)))})
 
+(cmd/command {:command :behaviors.force-reload
+              :desc "Plugins: Ignore cache and force reload the current behaviors file"
+              :exec (fn []
+                      (when-let [ed (pool/last-active)]
+                        (when (object/has-tag? ed :editor.behaviors)
+                          (swap! manager update-in [::force-reload] #(conj (or % #{}) (get-in @ed [:info :path])))
+                          (cmd/exec! :behaviors.reload))))})
+
 ;;*********************************************************
 ;; Plugin reading
 ;;*********************************************************
 
-(defn validate [plugin]
+(defn validate [plugin filename]
   (let [valid? (every? plugin [:name :author :behaviors :desc])]
     (if-not valid?
       (do
-        (console/error (str "Invalid plugin.json file: " (:dir plugin) "/plugin.json \nPlugins
-                            must include values for name, version, author, behaviors, and desc."))
+        (console/error (str "Invalid " filename " file: " (:dir plugin) "/" filename "\nPlugins "
+                            "must include values for name, version, author, behaviors, and desc."))
         nil)
       plugin)))
 
 (defn plugin-edn [dir]
-  (when-let [content (files/open-sync (files/join dir "plugin.edn"))]
-    (-> (EOF-read (:content content))
-        (assoc :dir dir)
-        (validate))))
+  (let [file (files/join dir "plugin.edn")]
+    (when-let [content (and (files/exists? file) (files/open-sync file))]
+      (try
+        (-> (EOF-read (:content content))
+            (assoc :dir dir)
+            (validate "plugin.edn"))
+        (catch :default e
+          (console/error (str "FAILED to load plugin.edn: " dir)))))))
 
 (defn plugin-json [dir]
-  (when-let [content (files/open-sync (files/join dir "plugin.json"))]
-    (-> (js/JSON.parse (:content content))
-        (js->clj :keywordize-keys true)
-        (assoc :dir dir)
-        (validate))))
+  (let [file (files/join dir "plugin.json")]
+    (when-let [content (and (files/exists? file) (files/open-sync file))]
+      (-> (js/JSON.parse (:content content))
+          (js->clj :keywordize-keys true)
+          (assoc :dir dir)
+          (validate "plugin.json")))))
 
 (defn plugin-info [dir]
   (or (plugin-json dir) (plugin-edn dir)))
 
-(defn available-plugins []
-  (let [ds (concat (files/dirs user-plugins-dir)
-                   (files/dirs plugins-dir))
-        plugins (->> ds
-                     (map plugin-info)
-                     (filterv identity))]
-    (-> (reduce (fn [final p]
-                  (if-let [cur (get final (:name p))]
-                    ;;check if it's newer
-                    (if (deploy/is-newer? (:version cur) (:version p))
-                      (assoc! final (:name p) p)
-                      final)
-                    (assoc! final (:name p) p)))
+(defn missing-deps [all]
+  (let [deps (->> (vals all)
+                  (mapcat (comp seq :dependencies)))]
+    (-> (reduce (fn [final [name version]]
+                  (let [name (cljs.core/name name)]
+                    (if-let [cur (or (get all name) (get final name))]
+                      (if (deploy/is-newer? (:version cur) version)
+                        (assoc! final name {:name name
+                                            :version version})
+                        final)
+                      (assoc! final name {:name name
+                                          :version version}))))
                 (transient {})
-                plugins)
-        (persistent!))))
+                deps)
+        (persistent!)
+        (vals)
+        (seq))))
 
+(defn outdated? [plugin]
+  (let [cached (-> @manager :server-plugins (get (:name plugin)) :latest-version)]
+    (if cached
+      (deploy/is-newer? (:version plugin) cached))))
 
 (defn plugin-behaviors [plug]
-  (let [{:keys [behaviors dir]} plug
-        file (files/join dir behaviors)
-        behs (-> (files/open-sync file)
-                 (:content)
-                 (settings/safe-read file))]
-    (when behs
-      (walk/prewalk (fn [x]
-                      (when (list? x)
-                        (alter-meta! x assoc ::dir dir))
-                      x)
-                    behs)
-      behs)))
+  (when (seq plug)
+    (try
+     (let [{:keys [behaviors dir]} plug
+           file (files/join dir behaviors)
+           file (files/real-path file)
+           behs (settings/parse-file file)
+           force? (get (::force-reload @manager) file)]
+       (when force?
+         (swap! manager update-in [::force-reload] disj file))
+       (when behs
+         (walk/prewalk (fn [x]
+                         (when (coll? x)
+                           (alter-meta! x assoc ::dir dir ::force-reload force?))
+                         x)
+                       behs)
+         behs))
+     (catch :default e
+       (console/error (str "Could not load behaviors for plugin: " (:name plug)))
+       {}))))
 
 (defn plugin-dependency-graph [plugins]
   (into {}
@@ -155,6 +186,138 @@
      (reduce str (interpose " => " cycle))]))
 
 ;;*********************************************************
+;; Metadata
+;;*********************************************************
+
+(declare install-failed)
+
+(def metadata-commits "https://api.github.com/repos/LightTable/plugin-metadata/commits")
+(def metadata-download "https://api.github.com/repos/LightTable/plugin-metadata/tarball/master")
+(def metadata-dir (files/lt-user-dir "metadata"))
+(def metadata-cache (files/join metadata-dir "cache.json"))
+
+(defn version-sort [a b]
+  (cond
+   (= a b) 0
+   (deploy/is-newer? a b) -1
+   :else 1))
+
+(defn- valid-plugin-dir?
+  [path]
+  (and (files/dir? path)
+       (not (= "script" (files/basename path)))))
+
+(defn build-cache [sha]
+  (let [items (filter valid-plugin-dir? (files/full-path-ls metadata-dir))
+        cache (into {:__sha sha}
+                    (for [plugin items
+                          :let [versions (->> (files/full-path-ls plugin)
+                                              (filter files/dir?)
+                                              (map plugin-info)
+                                              (sort-by :version version-sort)
+                                              (vec))
+                                latest (last versions)]]
+                      [(:name latest) {:versions (into {} (map (juxt :version identity) versions))
+                                       :latest-version (:version latest)}]
+                      ))]
+    cache))
+
+(defn save-cache [cache]
+  (files/save metadata-cache (js/JSON.stringify (clj->js cache))))
+
+(defn latest-metadata-sha []
+  (fetch/xhr [:get metadata-commits] {}
+             (fn [data]
+               (when-let [parsed (try (js/JSON.parse data)
+                                   (catch :default e
+                                     (console/error (str "Invalid JSON response from " metadata-commits ": " (pr-str data)))))]
+                 (let [sha (-> (aget parsed 0)
+                               (aget "sha"))]
+                   (object/raise manager :metadata.sha sha))))))
+
+(defn download-metadata [sha]
+  (let [tmp-gz (files/lt-user-dir "metadata-temp.tar.gz")
+        tmp-dir (files/lt-user-dir "metadata-temp")]
+    (notifos/working "Updating plugin metadata")
+    (deploy/download-file metadata-download tmp-gz (fn []
+                                                     (deploy/untar tmp-gz tmp-dir
+                                                                   (fn []
+                                                                     (notifos/done-working)
+                                                                     (let [munged-dir (first (files/full-path-ls tmp-dir))]
+                                                                       (when munged-dir
+                                                                         (when (files/exists? metadata-dir)
+                                                                           (files/delete! metadata-dir))
+                                                                         (files/move! munged-dir metadata-dir))
+                                                                       (files/delete! tmp-dir)
+                                                                       (files/delete! tmp-gz)
+                                                                       (if munged-dir
+                                                                         (do
+                                                                           (save-cache (build-cache sha))
+                                                                           (notifos/done-working (str "Plugin metadata updated. "))
+                                                                           (object/raise manager :metadata.updated))
+                                                                         (install-failed "metadata")))))))))
+
+(defn read-cache []
+  (if (files/exists? metadata-cache)
+    (-> (files/open-sync metadata-cache)
+        (:content)
+        (js/JSON.parse)
+        (js->clj :keywordize-keys true))))
+
+(defn search-plugins [plugins search]
+  (let [search (.toLowerCase search)]
+    (filter (fn [plugin]
+              (or (> (.indexOf (.toLowerCase (:name plugin "")) search) -1)
+                  (> (.indexOf (.toLowerCase (:author plugin "")) search) -1)
+                  (> (.indexOf (.toLowerCase (:desc plugin "")) search) -1)))
+            plugins)))
+
+
+(defn latest-version-merge [neue old]
+  (let [neue (seq neue)]
+    (reduce
+     (fn [final [name ver]]
+       (if-let [cur-ver (-> name final :version)]
+         (if (deploy/is-newer? ver cur-ver)
+           (assoc final name ver)
+           final)
+         (assoc final name ver)))
+     old
+     neue)))
+
+(defn transitive-deps [plugins [name ver] seen]
+  (let [name (keyword name)]
+    (if-let [cur (get-in plugins [name :versions (keyword ver)])]
+      (let [deps (-> cur :dependencies)
+            unique (remove seen (keys deps))
+            seen (latest-version-merge {name cur} seen)]
+        (reduce
+         (fn [seen cur]
+           (transitive-deps plugins cur seen))
+         seen
+         (select-keys deps unique)))
+      seen)))
+
+
+(defn latest-version [plugin]
+  (get (:versions plugin) (keyword (:latest-version plugin))))
+
+(defn all-latest [plugins]
+  (->> (dissoc plugins :__sha)
+       (vals)
+       (map latest-version)))
+
+;; (plugin->tar (:Rainbow (transitive-deps (:server-plugins @manager) ["Rainbow" "0.0.8"] {})))
+;; (save-cache (build-cache))
+;; (object/raise manager :plugin-results (vals (read-cache)))
+;; (object/merge! manager {:server-plugins (read-cache)})
+
+
+;; (build-cache)
+
+;; (download-metadata "foo")
+
+;;*********************************************************
 ;; Plugin install/uninstall
 ;;*********************************************************
 
@@ -163,6 +326,14 @@
              (not (:version (by-name name))))
     (object/update! app/app [::plugins] dissoc name))
   (notifos/done-working (str "Plugin install failed for: " name)))
+
+(defn plugin->tar [plugin]
+  (let [[repo username] (->> (string/split (:source plugin) "/")
+                   (reverse)
+                   (filter #(not= % ""))
+                   (take 2))
+        repo (.replace repo #".git" "")]
+    (str "https://api.github.com/repos/" username "/" repo "/tarball/" (:version plugin))))
 
 (defn fetch-and-install [url name cb]
   (let [munged-name (munge-plugin-name name)
@@ -174,9 +345,12 @@
                                        (notifos/working "Extracting plugin...")
                                        (deploy/untar tmp-gz tmp-dir
                                                      (fn []
-                                                       (let [munged-dir (first (files/full-path-ls tmp-dir))]
+                                                       (let [munged-dir (first (files/full-path-ls tmp-dir))
+                                                             final-path (str user-plugins-dir "/" munged-name "/")]
                                                          (when munged-dir
-                                                           (files/move! munged-dir (str user-plugins-dir "/" munged-name "/")))
+                                                           (when (files/exists? final-path)
+                                                             (files/delete! final-path))
+                                                           (files/move! munged-dir final-path))
                                                          (files/delete! tmp-dir)
                                                          (files/delete! tmp-gz)
                                                          (if munged-dir
@@ -188,7 +362,7 @@
                                                            (install-failed name)))))))))
 
 (defn install-version [plugin cb]
-  (let [name (-> plugin :info :name)
+  (let [name (-> plugin :name)
         ver (-> plugin :version)
         installed? (-> @app/app ::plugins (get name))]
     (if (or (not installed?)
@@ -196,9 +370,8 @@
                  (deploy/is-newer? (:version installed?) ver)))
       (do
         (object/update! app/app [::plugins] assoc name {})
-        (fetch-and-install (-> plugin :tar) name
+        (fetch-and-install (plugin->tar plugin) name
                            (fn []
-                             (object/raise manager :refresh!)
                              (when cb
                                (cb true))
                              )))
@@ -208,7 +381,7 @@
           (cb false))))))
 
 (defn transitive-install [plugin deps cb]
-  (let [cur (or (-> plugin :name) (-> plugin :info :name))
+  (let [cur (-> plugin :name keyword)
         others (dissoc deps cur)
         counter (atom (count others))
         count-down (fn []
@@ -217,10 +390,7 @@
                      (when (<= @counter 0)
                        (install-version (deps cur) (fn [installed?]
                                                      (when cb
-                                                       (cb installed?))
-                                                     (when installed?
-                                                       ;;a new plugin has been installed, we should reload everything
-                                                       (cmd/exec! :behaviors.reload))))))]
+                                                       (cb installed?))))))]
     ;;first get and install all the deps
     ;;count them down and then install the real plugin and reload.
     (if (seq others)
@@ -229,17 +399,68 @@
       (count-down))))
 
 (defn discover-deps [plugin cb]
-  (fetch/xhr [:post (str plugins-url "/install")] {:name (or (-> plugin :name) (-> plugin :info :name))
-                                                   :version (or (-> plugin :version)
-                                                                (-> plugin :info :version))}
-                                   (fn [data]
-                                     (if-not (and data (seq data))
-                                       (install-failed (or (-> plugin :name) (-> plugin :info :name)))
-                                       (transitive-install plugin (EOF-read data) cb)))))
+  (let [deps (transitive-deps (:server-plugins @manager) [(:name plugin) (:version plugin)] {})]
+    (if-not (seq deps)
+      (install-failed (:name plugin))
+      (transitive-install plugin deps cb))))
+
+(defn install-missing [missing]
+  (let [counter (atom (count missing))
+        count-down (fn []
+                     (swap! counter dec)
+                     ;;then install the actual plugin
+                     (when (<= @counter 0)
+                       (cmd/exec! :behaviors.reload)
+                       (object/raise manager :refresh!)
+                       (notifos/set-msg! "All missing dependencies installed.")
+                       ))]
+    ;;first get and install all the deps
+    ;;count them down and then install the real plugin and reload.
+    (doseq [dep missing]
+      (discover-deps dep count-down))))
+
+(defn check-missing
+  "Check a plugins map for outdated or missing :dependencies and prompt
+  to install missing ones"
+  [deps]
+  (when-let [missing? (missing-deps deps)]
+    (popup/popup! {:header "Some plugin dependencies are missing."
+                   :body [:div
+                          [:span "We found that the following plugin dependencies are missing: "]
+                          (for [{:keys [name version]} missing?]
+                            [:div name " " version " "])
+                          [:span "Would you like us to install them?"]]
+                   :buttons [{:label "Cancel"}
+                             {:label "Install all"
+                              :action (fn []
+                                        (install-missing missing?))}]})))
+
+(defn available-plugins
+  "Return a map of plugins by plugin name based on what's read from filesystem"
+  []
+  (let [ds (concat (files/dirs user-plugins-dir)
+                   (files/dirs plugins-dir)
+                   [settings/user-plugin-dir])
+        plugins (->> ds
+                     (map plugin-info)
+                     (filterv identity))]
+    (-> (reduce (fn [final p]
+                  (if-let [cur (get final (:name p))]
+                    ;;check if it's newer
+                    (if (deploy/is-newer? (:version cur) (:version p))
+                      (assoc! final (:name p) p)
+                      final)
+                    (assoc! final (:name p) p)))
+                (transient {})
+                plugins)
+        (persistent!))))
 
 (defn uninstall [plugin]
-  (files/delete! (:dir plugin))
-  (object/raise manager :refresh!))
+  (when (:dir plugin)
+    (files/delete! (:dir plugin))
+    ;; :ignore-missing b/c uninstalled shows up missing
+    (object/raise manager :refresh! :ignore-missing true)
+    (notifos/set-msg! (str "Uninstalled " (:name plugin) " " (:version plugin)))))
 
 ;;*********************************************************
 ;; Manager ui
@@ -251,23 +472,6 @@
            (ctx/in! :popup.input))
   :blur (fn []
           (ctx/out! :popup.input)))
-
-(defn submit-url []
-  (let [input (url-input)
-        p (popup/popup! {:header "Submit a plugin to the central repository"
-                         :body [:div
-                                [:p "You can submit a github url to add a plugin to the central repository.
-                                 All plugin repos must have at least one tag in version format, e.g. 0.1.2 and must have a plugin.json
-                                 with name, version, desc, and behaviors keys. To refresh the available versions, just resubmit the plugin."]
-                                [:label "Github URL for plugin: "]
-                                input
-                                ]
-                         :buttons [{:label "cancel"}
-                                   {:label "submit"
-                                    :action (fn []
-                                              (object/raise manager :submit-plugin! (dom/val input)))}]})]
-    (dom/focus input)
-    (.setSelectionRange input 1000 1000)))
 
 (defui tab [this tab-name label]
   [:button {:class (bound this #(when (= tab-name (:tab %))
@@ -290,18 +494,23 @@
    (search-input this)])
 
 (defui source-button [plugin]
-  [:span.source [:a {:href (:url plugin (:source plugin))} "source"]]
+  [:span.source [:a {:href (:url plugin (:source plugin))} "website"]]
   :click (fn [e]
            (dom/prevent e)
            (dom/stop-propagation e)
-           (.Shell.openExternal app/gui (:url plugin (:source plugin)))))
+           (platform/open-url (:url plugin (:source plugin)))))
 
 (defui update-button [plugin]
   [:span.update]
   :click (fn [e]
            (dom/prevent e)
            (dom/stop-propagation e)
-           (discover-deps plugin nil)))
+           (discover-deps plugin (fn []
+                                   (object/raise manager :refresh!)
+                                   (cmd/exec! :behaviors.reload)
+                                   ;; Wait for behaviors.reload to write its message
+                                   (wait 1000 (fn []
+                                                (notifos/set-msg! (str "Updated " (:name plugin) " " (:version plugin)))))))))
 
 (defui install-button [plugin]
   [:span.install]
@@ -309,12 +518,28 @@
            (this-as me
                     (discover-deps plugin (fn []
                                             (dom/remove (dom/parent me))
-                                            )))
+                                            (object/raise manager :refresh!)
+                                            (cmd/exec! :behaviors.reload)
+                                            ;; Wait for behaviors.reload to write its message
+                                            (wait 1000 (fn []
+                                                         (notifos/set-msg! (str "Installed " (:name plugin) " " (:version plugin))))))))
            (dom/prevent e)
            (dom/stop-propagation e)))
 
+(defui plugin-link-title [plugin]
+  [:span.link (:name plugin)]
+  :click (fn [e]
+           (dom/prevent e)
+           (dom/stop-propagation e)
+           (platform/open-url (:url plugin (:source plugin)))))
+
+(defui plugin-title [plugin]
+  [:h1
+   (plugin-link-title plugin)
+   [:span.version (:version plugin)]])
+
 (defui server-plugin-ui [plugin]
-  (let [info (:info plugin)
+  (let [info plugin
         ver (:version info)
         installed (-> @app/app ::plugins (get (:name info)))
         update? (and (:version installed)
@@ -327,7 +552,7 @@
          (update-button plugin)
          [:span.installed]))
      (source-button plugin)
-     [:h1 (:name info) [:span.version ver]]
+     (plugin-title plugin)
      [:h3 (:author info)]
      [:p (:desc info)]]))
 
@@ -344,16 +569,16 @@
                                     {:label "Cancel"}]})))
 
 (defui installed-plugin-ui [plugin]
-  (let [cached (-> @manager :version-cache (get (:name plugin)))
+  (let [cached (-> @manager :server-plugins (get (keyword (:name plugin))) :latest-version)
         update? (when cached
                   (deploy/is-newer? (:version plugin) cached))]
     [:li {:class (if update?
                    "has-update")}
-     (if update?
-       (update-button (assoc plugin :version cached))
-       (uninstall-button plugin))
+     (when update?
+       (update-button (assoc plugin :version cached)))
+     (uninstall-button plugin)
      (source-button plugin)
-     [:h1 (:name plugin) [:span.version (:version plugin)]]
+     (plugin-title plugin)
      [:h3 (:author plugin)]
      [:p (:desc plugin)]
      ]))
@@ -367,6 +592,7 @@
                 :name "Plugins"
                 :tab :installed
                 :init (fn [this]
+                        (object/merge! this {:server-plugins (read-cache)})
                         [:div {:class (bound this #(str "plugin-manager"
                                                         (if (= (:tab %) :server)
                                                           " server")))}
@@ -377,27 +603,33 @@
 
 (def manager (object/create ::plugin-manager))
 
+
+
 ;;*********************************************************
 ;; Manager behaviors
 ;;*********************************************************
 
-(behavior ::update-server-plugins
+(behavior ::check-local-metadata-cache
+          :triggers #{:metadata.sha}
+          :desc "Plugin Manager: check local metadata cache for update"
+          :reaction (fn [this sha]
+                      (if-not (= (-> @this :server-plugins :__sha) sha)
+                        (download-metadata sha)
+                        (object/raise this :metadata.updated))))
+
+(behavior ::draw-plugins-on-updated
+          :triggers #{:metadata.updated}
+          :desc "Plugin Manager: draw plugins on metadata update"
+          :reaction (fn [this sha]
+                      (object/merge! this {:server-plugins (read-cache)})
+                      (object/raise this :plugin-results (all-latest (:server-plugins @this)))))
+
+(behavior ::get-latest-metadata-sha
           :triggers #{:fetch-plugins}
-          :desc "Plugin Manager: fetch plugins"
-          :reaction (fn [this]
-                      (notifos/working "Fetching available plugins...")
-                      (fetch/xhr [:post (str plugins-url "/versions")] {:names (pr-str (-> @app/app ::plugins keys vec))}
-                                 (fn [data]
-                                   (let [cache (EOF-read data)]
-                                     (when-not (= cache (:version-cache @this))
-                                       (object/merge! this {:version-cache cache})
-                                       (object/raise this :refresh!)))))
-                      (fetch/xhr [:get plugins-url] {}
-                                 (fn [data]
-                                   (notifos/done-working "")
-                                   (when data
-                                     (object/raise this :plugin-results (EOF-read data)))
-                                   ))))
+          :desc "Plugin Manager: get the latest metadata sha"
+          :reaction (fn [this sha]
+                      (latest-metadata-sha)))
+
 
 (behavior ::render-server-plugins
           :triggers #{:plugin-results}
@@ -405,53 +637,59 @@
           :reaction (fn [this plugins]
                       (let [ul (dom/$ :.server-plugins (object/->content this))]
                         (dom/empty ul)
-                        (->> (remove #(installed? (-> % :info :name)) plugins)
+                        (->> (remove #(installed? (-> % :name)) plugins)
                              (map server-plugin-ui)
                              (dom/fragment)
                              (dom/append ul)))))
-
-(behavior ::submit-plugin
-          :triggers #{:submit-plugin!}
-          :desc "Plugin Manager: submit a new plugin"
-          :reaction (fn [this url]
-                      (notifos/working (str "Submitting plugin: " url))
-                      (fetch/xhr [:post (str plugins-url "/add" )] {:url url}
-                                 (fn [data]
-                                   (notifos/done-working "")
-                                   (let [data (EOF-read data)]
-                                     (popup/popup! {:header (condp = (:status data)
-                                                              :success "Plugin added!"
-                                                              :error "There's a problem with the plugin."
-                                                              :refresh "Plugin refreshed!")
-                                                    :body [:div
-                                                           (if (= (:status data) :error)
-                                                             [:div "Url submitted: " url])
-                                                           [:p (:description data)]]
-                                                    :buttons [{:label "ok"}]}))))))
 
 (behavior ::search-server-plugins
           :triggers #{:search-plugins!}
           :desc "Plugin Manager: search plugins"
           :reaction (fn [this search]
-                      (if (empty? search)
-                        (object/raise this :fetch-plugins)
-                        (do
-                          (notifos/working (str "Searching plugins for: " search))
-                          (fetch/xhr [:post (str plugins-url "/search")] {:term search}
-                                     (fn [data]
-                                       (notifos/done-working "")
-                                       (when data
-                                         (object/raise this :plugin-results (EOF-read data)))
-                                       ))))))
+                      (let [plugins (all-latest (:server-plugins @manager))]
+                        (object/raise this
+                                      :plugin-results
+                                      (if (empty? search)
+                                        plugins
+                                        (search-plugins plugins search))))))
+
+(defn save-plugins [plugin-maps]
+  (let [plugin-edn-file (files/join settings/user-plugin-dir "plugin.edn")
+        plugin-edn (-> plugin-edn-file files/open-sync :content (settings/safe-read plugin-edn-file))
+        plugin-name (doto (:name plugin-edn) (assert "User plugin doesn't have a :name"))
+        deps (->> plugin-maps
+                  vals
+                  (remove #(contains? #{plugin-name} (:name %)))
+                  (map (juxt :name :version))
+                  (into (sorted-map)))
+         plugin-edn-body (pr-str (assoc plugin-edn :dependencies deps))]
+
+    (files/save plugin-edn-file
+                (-> plugin-edn-body
+                    ;; Until clojurescript gets pprint
+                    ;; one key/val pair or parent key per line for diffing
+                    (string/replace #"(\"\s*,|\{|\},)" #(str % "\n"))
+                    (string/replace-first #"^\{\n" "{")
+                    (string/replace-first #":dependencies"
+                                          ";; Do not edit - :dependencies are auto-generated\n:dependencies")))))
+
+(behavior ::save-user-plugin-dependencies
+          :triggers #{:refresh!}
+          :desc "Saves dependencies to user's plugin.edn"
+          :reaction (fn [this & opts]
+                      ;; Use available-plugins b/c ::plugins aren't always up to date e.g. uninstall
+                      (save-plugins (available-plugins))))
 
 (behavior ::render-installed-plugins
           :triggers #{:refresh!}
           :desc "Plugin Manager: refresh installed plugins"
-          :reaction (fn [this plugins]
+          :reaction (fn [this & {:keys [ignore-missing]}]
                       (object/merge! app/app {::plugins (available-plugins)})
+                      (when-not ignore-missing
+                        (check-missing (::plugins @app/app)))
                       (let [ul (dom/$ :.plugins (object/->content this))]
                         (dom/empty ul)
-                        (dom/append ul (dom/fragment (map installed-plugin-ui (->> @app/app ::plugins vals (sort-by :name))))))))
+                        (dom/append ul (dom/fragment (map installed-plugin-ui (->> @app/app ::plugins vals (sort-by #(.toUpperCase (:name %))))))))))
 
 (behavior ::on-close
           :triggers #{:close}
@@ -461,11 +699,6 @@
 ;;*********************************************************
 ;; Manager commands
 ;;*********************************************************
-
-(cmd/command {:command :plugin-manager.submit
-              :desc "Plugins: Submit a plugin"
-              :exec (fn []
-                      (submit-url))})
 
 (cmd/command {:command :plugin-manager.search
               :hidden true
@@ -486,7 +719,28 @@
               :desc "Plugins: Show plugin manager"
               :exec (fn []
                       (tabs/add-or-focus! manager)
+                      (dom/focus (dom/$ :input (object/->content manager)))
                       (cmd/exec! :plugin-manager.refresh))})
+
+(cmd/command {:command :plugin-manager.update-outdated
+              :desc "Plugins: Update all outdated"
+              :exec (fn []
+                      (let [outdated (filter outdated? (->> @app/app ::plugins vals))
+                            names (atom #{})
+                            countdown (atom (count outdated))]
+                        (doseq [plugin outdated
+                                :when (seq outdated)
+                                :let [cached (-> @manager :server-plugins (get (:name plugin)) :latest-version)]]
+                          (discover-deps (assoc plugin :version cached)
+                                         (fn []
+                                           (swap! names conj (:name plugin))
+                                           (swap! countdown dec)
+                                           (object/raise manager :refresh!)
+                                           (when (<= @countdown 0)
+                                             (cmd/exec! :behaviors.reload)
+                                             (notifos/set-msg! (apply str "Updated: "
+                                                                      (interpose ", " @names)))))))))})
+
 
 ;;*********************************************************
 ;; App-level plugin behaviors
@@ -497,8 +751,11 @@
           :reaction (fn [app]
                       (when-not (files/exists? user-plugins-dir)
                         (files/mkdir user-plugins-dir))
+                      (object/raise app/app :create-user-plugin)
+                      (object/raise app/app :flatten-map-settings)
                       ;;load enabled plugins
-                      (object/merge! app/app {::plugins (available-plugins)})))
+                      (object/merge! app/app {::plugins (available-plugins)})
+                      (check-missing (::plugins @app/app))))
 
 (behavior ::behaviors.refreshed-load-keys
           :triggers #{:behaviors.refreshed}
@@ -512,7 +769,6 @@
                             dep-graph (plugin-dependency-graph plugins)
                             dep-ordered (-> dep-graph
                                             (kahn/kahn-sort)
-                                            (reverse)
                                             (seq))
                             mapped (if dep-ordered
                                      (map plugins dep-ordered)
@@ -538,37 +794,37 @@
 
 (behavior ::load-js
           :triggers #{:object.instant-load}
-          :desc "App: Load a javascript file"
-          :params [{:label "path"}]
+          :desc "App: Load javascript file(s)"
+          :params [{:label "path(s)"}]
           :type :user
           :reaction (fn [this path]
-                      (binding [*plugin-dir* (::dir object/*behavior-meta*)]
+                      (binding [*plugin-dir* (::dir object/*behavior-meta*)
+                                load/*force-reload* (::force-reload object/*behavior-meta*)]
                         (let [paths (if (coll? path)
                                       path
                                       [path])]
                           (doseq [path paths]
                             (let [path (adjust-path path)]
-                              (when-not (get (::loaded-files @this) path)
+                              (when (or load/*force-reload*
+                                        (not (get (::loaded-files @this) path)))
                                 (try
                                   (load/js path true)
                                   (object/update! this [::loaded-files] #(conj (or % #{}) path))
-                                  (catch js/Error e
-                                    (.error js/console (str "Error loading JS file: " path " : " e))
-                                    (.error js/console (.-stack e)))
-                                  (catch js/global.Error e
-                                    (.error js/console (str "Error loading JS file: " path " : " e))
-                                    (.error js/console (.-stack e)))))))))))
+                                  (catch :default e
+                                    (console/error (str "Error loading JS file: " path " : " e) e))))))))))
 
 (behavior ::load-css
           :triggers #{:object.instant}
-          :desc "App: Load a css file"
-          :params [{:label "path"}]
+          :desc "App: Load css file(s)"
+          :params [{:label "path(s)"}]
           :type :user
           :reaction (fn [this path]
-                      (let [path (adjust-path path)]
-                        (when-not (get (::loaded-files @this) path)
-                          (object/update! this [::loaded-files] #(conj (or % #{}) path))
-                          (load/css path)))))
+                      (let [paths (map adjust-path (if (coll? path) path [path]))]
+                        (doseq [path paths]
+                          (when (or load/*force-reload*
+                                    (not (get (::loaded-files @this) path)))
+                            (object/update! this [::loaded-files] #(conj (or % #{}) path))
+                            (load/css path))))))
 
 (behavior ::load-keymap
           :triggers #{:object.instant}

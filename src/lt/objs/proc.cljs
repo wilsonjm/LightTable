@@ -1,16 +1,17 @@
 (ns lt.objs.proc
+  "Provide fns to spawn processes and manage them. Used by language plugins"
   (:require [lt.object :as object]
             [lt.objs.clients :as clients]
             [lt.objs.files :as files]
             [lt.objs.platform :as platform]
             [lt.objs.app :as app]
+            [lt.objs.notifos :as notifos]
             [lt.util.load :as load]
             [clojure.string :as string])
   (:require-macros [lt.macros :refer [behavior]]))
 
 (def shell (load/node-module "shelljs"))
 (def spawn (.-spawn (js/require "child_process")))
-(def cur-path (.pwd shell))
 (def custom-env (atom {}))
 
 (def procs (atom #{}))
@@ -47,8 +48,7 @@
   (let [proc (spawn command
                     (when (seq args) (clj->js args))
                     (js-obj "cwd" cwd?
-                            "env" (merge-env env)
-                            "windowsVerbatimArguments" (when (= js/process.platform "win32") true)))]
+                            "env" (merge-env env)))]
     (add! proc)
     (.on proc "exit" (partial rem! proc))
     (.on proc "error" #(when @obj
@@ -79,9 +79,9 @@
     nil))
 
 (behavior ::kill-procs-on-close
-                  :triggers #{:closed}
-                  :reaction (fn [this]
-                              (kill-all)))
+          :triggers #{:closed}
+          :reaction (fn [this]
+                      (kill-all)))
 
 (object/add-behavior! app/app ::kill-procs-on-close)
 
@@ -90,9 +90,9 @@
 ;;*******************************************************
 
 (behavior ::print-all
-                  :triggers #{:proc.error :proc.out :proc.exit}
-                  :reaction (fn [this data]
-                              (println "PROC: " data)))
+          :triggers #{:proc.error :proc.out :proc.exit}
+          :reaction (fn [this data]
+                      (println "PROC: " data)))
 
 (object/object* ::test-printer
                 :triggers []
@@ -128,32 +128,36 @@
       (str "PATH=" path-str ":$PATH && "))))
 
 (behavior ::set-path-OSX
-                  :triggers #{:init}
-                  :reaction (fn [app]
-                              (when (and (platform/mac?)
-                                         (not (aget js/process.env "LTCLI")))
-                                (.exec (js/require "child_process") (str (etc-paths->PATH) (get-path-command))
-                                       (fn [err out serr]
-                                         (when-not (empty? out)
-                                           (set! js/process.env.PATH out)))))))
+          :triggers #{:init}
+          :reaction (fn [app]
+                      (when (and (platform/mac?)
+                                 (not (aget js/process.env "LTCLI")))
+                        (.exec (js/require "child_process") (str (etc-paths->PATH) (get-path-command))
+                               (fn [err out serr]
+                                 (if-not (empty? err)
+                                   (do
+                                     (notifos/set-msg! "Failed to source PATH files. See console log for details." {:class "error"})
+                                     (.error js/console err))
+                                   (when-not (empty? out)
+                                     (set! js/process.env.PATH out))))))))
 
 (behavior ::global-path
-                  :triggers #{:object.instant}
-                  :desc "App: set global PATH for processes"
-                  :type :user
-                  :params [{:label "path"}]
-                  :exclusive true
-                  :reaction (fn [app path]
-                              (set! js/process.env.PATH path)))
+          :triggers #{:object.instant}
+          :desc "App: set global PATH for processes"
+          :type :user
+          :params [{:label "path"}]
+          :exclusive true
+          :reaction (fn [app path]
+                      (set! js/process.env.PATH path)))
 
 (behavior ::global-env
-                  :triggers #{:object.instant}
-                  :desc "App: add to the global ENV for processes"
-                  :params [{:label "env map"}]
-                  :type :user
-                  :exclusive true
-                  :reaction (fn [app kvs]
-                              (reset! custom-env kvs)))
+          :triggers #{:object.instant}
+          :desc "App: add to the global ENV for processes"
+          :params [{:label "env map"}]
+          :type :user
+          :exclusive true
+          :reaction (fn [app kvs]
+                      (reset! custom-env kvs)))
 
 
 (defn var-caps [vs]

@@ -1,4 +1,6 @@
 (ns lt.objs.canvas
+  "Provide canvas object which contains the primary div of the UI: #canvas.
+  Children divs are #multi (tabs), #side, #right-bar and #bottombar"
   (:refer-clojure :exclude [rem])
   (:require [lt.object :as object]
             [lt.objs.context :as ctx]
@@ -7,10 +9,6 @@
 
 (defui canvas-elem [obj]
   [:div#canvas])
-
-(defn add! [obj & [position?]]
-  (append (object/->content canvas) (object/->content obj))
-  (object/raise obj :show rep))
 
 ;;*********************************************************
 ;; Object
@@ -23,13 +21,17 @@
 (def canvas (object/create ::canvas))
 (append ($ "#wrapper") (object/->content canvas))
 
+(defn add! [obj & [position?]]
+  (append (object/->content canvas) (object/->content obj))
+  (object/raise obj :show))
+
 ;;*********************************************************
 ;; Behaviors
 ;;*********************************************************
 
 (behavior ::append-canvas
-                  :triggers #{:show}
-                  :reaction (fn [app]
-                              (dom/css ($ :#loader) {:opacity 0})
-                              (dom/css ($ :#wrapper) {:opacity 1})))
+          :triggers #{:show}
+          :reaction (fn [app]
+                      (dom/css ($ :#loader) {:opacity 0})
+                      (dom/css ($ :#wrapper) {:opacity 1})))
 

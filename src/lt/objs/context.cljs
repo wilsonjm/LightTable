@@ -1,4 +1,7 @@
 (ns lt.objs.context
+  "Provide context object which manages temporary contexts LT can get in.
+  An object can be associated with a context which is useful for keeping track
+  of current tabset or browser"
   (:require [lt.object :as object])
   (:require-macros [lt.macros :refer [behavior]]))
 
@@ -7,7 +10,6 @@
 (def ctx->obj (atom {}))
 (def ctx->group (atom {}))
 (def group->ctxs (atom {}))
-(def ctx-obj nil)
 
 (defn append-group [group name]
   (swap! groups (fn [all]
@@ -18,16 +20,17 @@
 (defn in? [k]
   (@contexts k))
 
-(defn out! [ctxs]
-  (let [ctxs (if (coll? ctxs)
-               ctxs
-               [ctxs])]
-    (swap! contexts #(apply disj % ctxs))
-    (swap! ctx->obj #(apply dissoc % ctxs))
-    (object/raise ctx-obj :out! ctxs)
-    (doseq [c ctxs
-            :when (in? c)]
-      (object/raise ctx-obj (keyword (str "out!" (name c)))))))
+(declare ctx-obj)
+
+(defn out!
+  ([ctxs]
+   (let [ctxs (if (coll? ctxs)
+                ctxs
+                [ctxs])]
+     (swap! contexts #(apply disj % ctxs))
+     (swap! ctx->obj #(apply dissoc % ctxs))
+     (object/raise ctx-obj :log!)))
+   ([ctxs _] (out! ctxs)))
 
 (defn in! [ctxs & [obj]]
   (let [ctxs (if (coll? ctxs)
@@ -35,11 +38,10 @@
                [ctxs])]
     (swap! contexts #(apply conj % ctxs))
     (swap! ctx->obj #(merge % (zipmap ctxs (repeat obj))))
-    (object/raise ctx-obj :in! ctxs)
+    (object/raise ctx-obj :log!)
     (doseq [c ctxs]
       (when-let [group (@group->ctxs (@ctx->group c))]
-        (out! group))
-      (object/raise ctx-obj (keyword (str "in!" (name c)))))))
+        (out! group)))))
 
 (defn toggle! [ctxs & [obj]]
   (doseq [c ctxs]
@@ -52,25 +54,32 @@
 
 (defn group! [ctx group]
   (swap! ctx->group assoc ctx group)
-  (swap! group->ctx update-in [group] conj ctx))
+  (swap! group->ctxs update-in [group] conj ctx))
 
 (defn ->obj [ctx]
   (@ctx->obj ctx))
 
-(behavior ::log-on-in
-                  :triggers #{:in!}
-                  :reaction (fn [obj ctxs]
-                              (log :context-in ctxs))
-                  )
+(defn enqueue [coll buffer size]
+  (if (= size
+         (count buffer))
+    (conj (pop buffer) coll)
+    (conj buffer coll)))
 
-(behavior ::log-on-out
-                  :triggers #{:out!}
-                  :reaction (fn [obj ctxs]
-                              (log :context-out ctxs))
-                  )
+(behavior ::log
+          :triggers #{:log!}
+          :debounce 16
+          :reaction (fn [this]
+                      (let [size (:buffer-size @this)
+                            ctx @contexts]
+                        (object/update! this
+                                        [:history]
+                                        #(enqueue ctx % size)))))
 
 (object/object* ::context
-                :init (fn []))
+                :tags #{:context}
+                :history cljs.core.PersistentQueue.EMPTY
+                :buffer-size 8
+                :init (fn [this]))
 
-(set! ctx-obj (object/create ::context))
 
+(def ctx-obj (object/create ::context))

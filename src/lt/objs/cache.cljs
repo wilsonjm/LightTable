@@ -1,4 +1,5 @@
 (ns lt.objs.cache
+  "Provide cache which persists to disk and thus across application reboots"
   (:require [lt.object :as object]
             [lt.objs.files :as files]
             [cljs.reader :as reader])
@@ -9,6 +10,9 @@
 (def settings (atom {}))
 
 (defn on-disk [cb]
+  ;; We must ensure the file's existence before attempting to open it.
+  (when-not (files/file? settings-path)
+    (files/save settings-path {}))
   (files/open settings-path (fn [data]
                               (if-not (empty? data)
                                 (cb (reader/read-string (:content data)))
@@ -36,8 +40,10 @@
              (swap! settings merge setts))))
 
 (behavior ::init
-          :triggers #{:init}
+          :triggers #{:deploy}
           :reaction (fn [this]
                       (when-not (files/exists? cache-path)
                         (files/mkdir cache-path))
                       (init)))
+
+(object/tag-behaviors :app [::init])

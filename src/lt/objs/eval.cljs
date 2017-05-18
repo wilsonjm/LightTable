@@ -1,4 +1,6 @@
 (ns lt.objs.eval
+  "Provide objects for doing evals through clients and displaying inline
+  results from evals"
   (:require [lt.object :as object]
             [lt.objs.canvas :as canvas]
             [lt.objs.editor :as ed]
@@ -14,7 +16,9 @@
             [crate.binding :refer [bound]]
             [lt.objs.console :as console]
             [lt.util.dom :as dom]
-            [clojure.string :as string])
+            [clojure.string :as string]
+            [cljs.reader :as reader]
+            [lt.objs.platform :as platform])
   (:require-macros [lt.macros :refer [behavior defui]]))
 
 (defui button [label & [cb]]
@@ -22,41 +26,6 @@
   :click (fn []
            (when cb
              (cb))))
-
-(defn unsupported []
-  (popup/show! [:h2 "We can't eval that yet."]
-               [:p "We can't eval this type of file yet. The extensions that we know how to execute are:"
-                (str " [ " (apply str (map #(str "." % " ") supported-types)) "]")]
-               (button "Cancel")
-               ))
-
-(defn find-client [{:keys [origin command info key create] :as opts}]
-  (let [[result client] (clients/discover command info)
-        key (or key :default)]
-    (condp = result
-      :none (if create
-              (create opts)
-              (do
-                (notifos/done-working)
-                (object/raise evaler :no-client opts)
-                (clients/placeholder)))
-      :found client
-      :select (do
-                (object/raise evaler :select-client client (fn [client]
-                                                             (clients/swap-client! (-> @origin :client key) client)
-                                                             (object/update! origin [:client] assoc key client)))
-                (clients/placeholder))
-      :unsupported (unsupported))))
-
-(defn get-client! [{:keys [origin command key create] :as opts}]
-  (let [key (or key :default)
-        cur (-> @origin :client key)]
-    (if (and cur (clients/available? cur))
-      cur
-      (let [neue (find-client opts)]
-        (object/update! origin [:client] assoc key neue)
-        (object/raise origin :set-client neue)
-        neue))))
 
 (defn unescape-unicode [s]
   (string/replace s
@@ -144,10 +113,36 @@
 (defn try-read [r]
   (try
     (reader/read-string r)
-    (catch js/Error e
-      r)
-    (catch js/globa.Error e
-      r)))
+    (catch :default e
+      (console/error e))))
+
+(defn find-client [{:keys [origin command info key create] :as opts}]
+  (let [[result client] (clients/discover command info)
+        key (or key :default)]
+    (condp = result
+      :none (if create
+              (create opts)
+              (do
+                (notifos/done-working)
+                (object/raise evaler :no-client opts)
+                (clients/placeholder)))
+      :found client
+      :select (do
+                (object/raise evaler :select-client client (fn [client]
+                                                             (clients/swap-client! (-> @origin :client key) client)
+                                                             (object/update! origin [:client] assoc key client)))
+                (clients/placeholder))
+                )))
+
+(defn get-client! [{:keys [origin command key create] :as opts}]
+  (let [key (or key :default)
+        cur (-> @origin :client key)]
+    (if (and cur (clients/available? cur))
+      cur
+      (let [neue (find-client opts)]
+        (object/update! origin [:client] assoc key neue)
+        (object/raise origin :set-client neue)
+        neue))))
 
 ;;****************************************************
 ;; inline result
@@ -161,15 +156,17 @@
          " open"
          )))
 
-(defn truncate-result [r opts]
-  (when (string? r)
-    (let [nl (.indexOf r "\n")
-          len (if (> nl -1)
-                nl
-                (:trunc-length opts 50))]
-      (if (> (count r) len)
-        (subs r 0 len)
-        r))))
+(defn truncate-result
+  ([r] (truncate-result r nil))
+  ([r opts]
+   (when (string? r)
+     (let [nl (.indexOf r "\n")
+           len (if (> nl -1)
+                 nl
+                 (:trunc-length opts 50))]
+       (if (> (count r) len)
+         (str (subs r 0 len)  " …")
+         r)))))
 
 (defui ->inline-res [this info]
   (let [r (:result info)
@@ -190,14 +187,16 @@
               (dom/prevent e)
               (object/raise this :double-click)))
 
-(behavior ::result-menu!
-          :triggers #{:menu!}
-          :reaction (fn [this ev]
-                      (-> (menu/menu [{:label "Remove result"
-                                       :click (fn [] (object/raise this :clear!))}])
-                          (menu/show-menu (.-clientX ev) (.-clientY ev)))
-                      (dom/prevent ev)
-                      (dom/stop-propagation ev)))
+(behavior ::result-menu+
+          :triggers #{:menu+}
+          :reaction (fn [this items]
+                      (conj items
+                            {:label "Remove result"
+                             :order 1
+                             :click (fn [] (object/raise this :clear!))}
+                            {:label "Copy result"
+                             :order 2
+                             :click (fn [] (object/raise this :copy))})))
 
 (behavior ::expand-on-click
           :triggers #{:click :expand!}
@@ -227,6 +226,11 @@
                         (.clear (:mark @this))
                         (object/raise this :clear)
                         (object/raise this :cleared))))
+
+(behavior ::copy-result
+          :triggers #{:copy}
+          :reaction (fn [this]
+                      (platform/copy (:result @this))))
 
 (behavior ::changed
           :triggers #{:changed}
@@ -322,6 +326,11 @@
 ;; underline result
 ;;****************************************************
 
+(defn ->spacing [text]
+  (when text
+    (-> (re-seq #"^\s+" text)
+        (first))))
+
 (defui ->underline-result [this info]
   [:div {:class (str "underline-result " (when (-> info :class) (:class info)))}
    [:span.spacer (->spacing (ed/line (:ed info) (-> info :loc :line)))]
@@ -374,14 +383,15 @@
                             (object/raise widget :clear!)))
                         (object/update! this [:widgets] assoc [line :underline] res-obj))))
 
+(behavior ::copy-underline-result
+          :triggers #{:copy}
+          :reaction (fn [this]
+                      (platform/copy (string/join "\n"
+                                                  (map #(.-innerText %) (.-children (:result @this)))))))
+
 ;;****************************************************
 ;; inline exception
 ;;****************************************************
-
-(defn ->spacing [text]
-  (when text
-    (-> (re-seq #"^\s+" text)
-        (first))))
 
 (defn ->exception-class [this]
   (str "inline-exception " (when (:open this)
@@ -410,30 +420,37 @@
           :triggers #{:clear!}
           :reaction (fn [this]
                       (when (ed/->cm-ed (:ed @this))
-                        (ed/remove-line-widget (ed/->cm-ed (:ed @this)) (:widget @this)))i
+                        (ed/remove-line-widget (ed/->cm-ed (:ed @this)) (:widget @this)))
                       (object/raise this :clear)
                       (object/raise this :cleared)))
 
-(behavior ::ex-menu!
-          :triggers #{:menu!}
-          :reaction (fn [this ev]
-                      (-> (menu/menu [{:label "Remove exception"
-                                       :click (fn [] (object/raise this :clear!))}])
-                          (menu/show-menu (.-clientX ev) (.-clientY ev)))
-                      (dom/prevent ev)
-                      (dom/stop-propagation ev)))
+(behavior ::ex-menu+
+          :triggers #{:menu+}
+          :reaction (fn [this items]
+                      (conj items
+                            {:label "Remove exception"
+                             :click (fn [] (object/raise this :clear!))}
+                            {:label "Copy exception"
+                             :click (fn [] (object/raise this :copy))})))
+
+(behavior ::copy-exception
+          :triggers #{:copy}
+          :reaction (fn [this]
+                      (platform/copy (:ex @this))))
 
 (object/object* ::inline-exception
                 :triggers #{:click :double-click :clear!}
                 :tags #{:inline :inline.exception}
                 :init (fn [this info]
-                        (let [content (->inline-exception this info)]
-                          (object/merge! this (assoc info
-                                                :widget (ed/line-widget (ed/->cm-ed (:ed info))
-                                                                        (-> info :loc :line)
-                                                                        content
-                                                                        {:coverGutter false})))
-                          content)))
+                        (if-not (-> info :loc :line)
+                          (notifos/set-msg! (str (:ex info)) {:class "error"})
+                          (let [content (->inline-exception this info)]
+                            (object/merge! this (assoc info
+                                                  :widget (ed/line-widget (ed/->cm-ed (:ed info))
+                                                                          (-> info :loc :line)
+                                                                          content
+                                                                          {:coverGutter false})))
+                            content))))
 
 (behavior ::inline-exceptions
           :triggers #{:editor.exception}

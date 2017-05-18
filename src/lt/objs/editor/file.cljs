@@ -1,4 +1,5 @@
 (ns lt.objs.editor.file
+  "Provide behaviors for a file-based editor object"
   (:require [lt.object :as object]
             [lt.objs.editor :as ed]
             [lt.objs.document :as doc]
@@ -13,14 +14,17 @@
           :reaction (fn [editor]
                       (let [{:keys [path]} (@editor :info)
                             final (object/raise-reduce editor :save+ (ed/->val editor))]
+                        (when (not= final (ed/->val editor))
+                          (let [y-position (.-top (.getScrollInfo (ed/->cm-ed editor)))]
+                            (ed/set-val-and-keep-cursor editor final)
+                            (ed/scroll-to editor 0 y-position)))
                         (doc/save path final
                                   (fn []
                                     (object/merge! editor {:dirty false
                                                            :editor.generation (ed/->generation editor)})
                                     (object/raise editor :saved)
-                                    (object/raise editor :clean)
-                                    ;;TODO: saved
-                                    )))))
+                                    ;; TODO: :clean trigger unused internally. Consider removing
+                                    (object/raise editor :clean))))))
 
 (behavior ::dirty-on-change
           :throttle 100
@@ -40,7 +44,7 @@
           :triggers #{:save+}
           :reaction (fn [editor content]
                       (if (= "\r\n" (or (-> @editor :info :line-ending) files/line-ending))
-                        (string/replace content "(\r\n|\n)" "\r\n")
+                        (string/replace content (js/RegExp. "(\r?\n|\n)" "gm") "\r\n")
                         content)))
 
 

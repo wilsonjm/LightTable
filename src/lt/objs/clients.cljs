@@ -1,4 +1,6 @@
 (ns lt.objs.clients
+  "Provide clients object for managing multiple types of clients e.g. browser
+  or Clojure and their connections"
   (:refer-clojure :exclude [send])
   (:require [lt.object :as object]
             [lt.util.js :refer [wait]]
@@ -8,12 +10,18 @@
 
 (def cs (atom {}))
 
+(defn ->id [obj]
+  (object/->id obj))
+
+(defn client! [type]
+  (let [obj (object/create ::client)]
+    (object/add-tags obj [type])
+    (swap! cs assoc (->id obj) obj)
+    obj))
+
 (defn by-id [n]
   (when n
     (@cs n)))
-
-(defn ->id [obj]
-  (object/->id obj))
 
 (defn by-name [n]
   (first (filter #(= n (:name @%)) (vals @cs))))
@@ -30,6 +38,8 @@
     (when tags
       (object/add-tags client tags))))
 
+(declare clients)
+
 (defn handle-connection! [info]
   (if-let [client (by-id (:client-id info))]
     (do
@@ -41,7 +51,7 @@
       (handle-connection! (assoc info :client-id (->id c))))))
 
 (defn rem! [client]
-  (let [id (by-id (->id client))]
+  (let [cname (:name @client)]
     (swap! cs dissoc (->id client))
     (object/raise client :disconnect)
     (object/destroy! client)
@@ -113,20 +123,22 @@
     (= (.indexOf (string/lower-case sub) (string/lower-case root)) 0)))
 
 ;;return client based on path and type
-(defn discover* [command {:keys [path]}]
-  (let [all (filter (fn [cur]
-                      (let [{:keys [dir commands]} (if (satisfies? IDeref cur)
-                                                     @cur
-                                                     cur)]
-                        (and (if (and path dir)
-                               (subpath? dir path)
-                               true)
-                             (get commands command))))
-                    (vals @cs))
-        with-dir (filter #(@% :dir) all)]
-    (if (and path (seq with-dir))
-      with-dir
-      all)))
+(defn discover*
+  ([command] (discover* command nil))
+  ([command {:keys [path]}]
+   (let [all (filter (fn [cur]
+                       (let [{:keys [dir commands]} (if (satisfies? IDeref cur)
+                                                      @cur
+                                                      cur)]
+                         (and (if (and path dir)
+                                (subpath? dir path)
+                                true)
+                              (get commands command))))
+                     (vals @cs))
+         with-dir (filter #(@% :dir) all)]
+     (if (and path (seq with-dir))
+       with-dir
+       all))))
 
 (defn discover [command info]
   (let [[found & others :as all] (discover* command info)]
@@ -160,43 +172,37 @@
 (def clients (object/create ::clients))
 
 (behavior ::close-clients-on-closed
-                  :triggers #{:closing}
-                  :reaction (fn [app]
-                              (doseq [[_ c] @cs]
-                                (close! c))))
+          :triggers #{:closing}
+          :reaction (fn [app]
+                      (doseq [[_ c] @cs]
+                        (close! c))))
 
 (behavior ::on-destroy-remove-cb
-                  :triggers #{:destroy}
-                  :reaction (fn [this]
-                              (rem-cb this)))
+          :triggers #{:destroy}
+          :reaction (fn [this]
+                      (rem-cb this)))
 
 (behavior ::raise-on-object
-                  :triggers #{:clients.raise-on-object}
-                  :reaction (fn [this [id command data]]
-                              (object/raise (object/by-id id) (keyword command) data)))
+          :triggers #{:clients.raise-on-object}
+          :reaction (fn [this [id command data]]
+                      (object/raise (object/by-id id) (keyword command) data)))
 
 (behavior ::handle-message
-                  :triggers #{:message}
-                  :reaction (fn [obj [cb-id command data :as msg]]
-                              (cond
-                               (callback? cb-id) (call cb-id (keyword command) data)
-                               (object/by-id cb-id) (object/raise (object/by-id cb-id) (keyword command) data)
-                               :else (object/raise clients (keyword command) data))))
+          :triggers #{:message}
+          :reaction (fn [obj [cb-id command data :as msg]]
+                      (cond
+                       (callback? cb-id) (call cb-id (keyword command) data)
+                       (object/by-id cb-id) (object/raise (object/by-id cb-id) (keyword command) data)
+                       :else (object/raise clients (keyword command) data))))
 
 (behavior ::notify-connect
-                  :triggers #{:connect}
-                  :reaction (fn [obj client]
-                              (notifos/set-msg! (str "Connected to " (:name @client)))))
+          :triggers #{:connect}
+          :reaction (fn [obj client]
+                      (notifos/set-msg! (str "Connected to " (:name @client)))))
 
 ;;**********************************************************
 ;; individual Clients
 ;;**********************************************************
-
-(defn client! [type]
-  (let [obj (object/create ::client)]
-    (object/add-tags obj [type])
-    (swap! cs assoc (->id obj) obj)
-    obj))
 
 (defn placeholder []
   (-> (object/create ::client)
@@ -215,28 +221,28 @@
                 :tags #{:client})
 
 (behavior ::try-send
-                  :triggers #{:try-send!}
-                  :reaction (fn [this msg]
-                              (if (:connected @this)
-                                (object/raise this :send! msg)
-                                (object/raise this :queue! msg))))
+          :triggers #{:try-send!}
+          :reaction (fn [this msg]
+                      (if (:connected @this)
+                        (object/raise this :send! msg)
+                        (object/raise this :queue! msg))))
 
 (behavior ::queue!
-                  :triggers #{:queue!}
-                  :reaction (fn [this msg]
-                              (object/update! this [:queue] conj msg)))
+          :triggers #{:queue!}
+          :reaction (fn [this msg]
+                      (object/update! this [:queue] conj msg)))
 
 (behavior ::on-connect-drain
-                  :triggers #{:connect}
-                  :reaction (fn [this]
-                              (object/merge! this {:connected true})
-                              (doseq [q (:queue @this)]
-                                (object/raise this :send! q)
-                                ;;Tremendous hack to sleep for a tiny bit before sending the next.
-                                (doall (range 10000)))
-                              (object/merge! this {:queue []})))
+          :triggers #{:connect}
+          :reaction (fn [this]
+                      (object/merge! this {:connected true})
+                      (doseq [q (:queue @this)]
+                        (object/raise this :send! q)
+                        ;;Tremendous hack to sleep for a tiny bit before sending the next.
+                        (doall (range 10000)))
+                      (object/merge! this {:queue []})))
 
 (behavior ::remove-placeholder-on-swapped
-                  :triggers #{:swapped}
-                  :reaction (fn [this]
-                              (object/destroy! this)))
+          :triggers #{:swapped}
+          :reaction (fn [this]
+                      (object/destroy! this)))

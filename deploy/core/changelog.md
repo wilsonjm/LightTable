@@ -1,9 +1,239 @@
 #Changes
 
+## 0.8.1
+
+* CHANGED: [:app :lt.objs.settings/pair-keymap-diffs] behavior is being deprecated. Use [:editor :lt.objs.editor/autoclose-brackets] in your user.behaviors instead. lt.objs.editor/autoclose-brackets should fix autoclosing characters e.g. '[{" for international users.
+* CHANGED: Backspace key uses the same CodeMirror plugin that lt.objs.editor/autoclose-brackets does
+* CHANGED: lt.util.cljs/js->clj is being deprecated. Plugin authors can use the js->clj that comes with ClojureScript
+* CHANGED: Removed unused lt.objs.titlebar ns and lt.objs.titlebar/add-titlebar behavior
+* CHANGED: Removed unused styling in structure.css
+* CHANGED: Removed harbor and jshint node packages that belong to other LightTable plugins
+* CHANGED: Removed :hide-connect command which is the same as :show-connect
+* CHANGED: Removed light skin which was just a confusing pointer to dark skin
+* CHANGED: files/open-sync logs an error when trying to open a nonexistent file. Previously the error was ignored
+* CHANGED: Check for updates every hour instead of every 5 minutes
+* FIX: Git (vcs) friendly! Changing branches and doing rebases doesn't cause buggy dialogs. If a file is removed, the tab is closed. If a file has a local modification, the user decides whether to overwrite the current file or not
+* FIX: LightTable documentation supports navigation as it is now in a browser tab
+* FIX: Save and remove trailing whitespace behavior refreshes tab
+* FIX: Navigator no longer cuts off end of files i.e. can scroll horizontally
+* FIX: Case sensitive renaming of files e.g. readme -> README
+* FIX: Faster detection of binaries in build scripts
+* FIX: In linux, middle click to close tab doesn't paste clipboard contents
+* FIX: :open-path command resolves relative paths before opening them
+* FIX: Clearer description of font-settings behavior
+* FIX: Clear console error when github endpoints returns invalid JSON
+* FIX: All errors are consistently caught and logged to console
+* ADDED: Light Table builds without warnings on ClojureScript 1.7.x
+* ADDED: Add build target for generating cljsdeps.js (need for ClojureScript upgrade)
+* ADDED: Linux and Windows users have access keys on menus
+* ADDED: Linux and Windows users have additional menu items under File: Quit Light Table and About Light Table
+* ADDED: Added file type definitions for html templates: ERB, ASPX, EJS, JSP
+* ADDED: Command-0/Ctrl-0 to reset zoom and Command-=/Ctrl-= to zoom in
+* ADDED: Disply notification to user after installing/updating/uninstalling a plugin
+
+## 0.8.0
+
+* CHANGED: We have switched to Electron from NW.js
+* CHANGED: LT's releases and self-updating processes are completely in the open on Github
+* CHANGED: We no longer ship with a node binary as we're able to use Electon's node binary for background processes
+* CHANGED: Proxy support has been disabled. There is an issue for re-enabling it at https://github.com/LightTable/LightTable/issues/1984. We are looking for help on how to QA this.
+* CHANGED: `:lt.objs.app/set-default-zoom-level` behavior takes a value from 0 to 1. With NW.js, it could take negative numbers which no longer work and will _freeze_ LT on startup
+* CHANGED: When opening a file from the commandline, each invocation opens a new LightTable app regardless of whether LightTable is already open. To optionally bring back the old behavior, see https://github.com/LightTable/LightTable/issues/2014.
+* CHANGED: Provide constant port number 5678 for external browser connection
+* CHANGED: Beginner friendly explanations to user.keymap and user.behaviors
+* CHANGED: 32-bit linux is no longer an official download. Building from source will still be supported
+* FIX: Major usability issues on >= OSX 10.10
+* FIX: Bug in :editor.force.wrap command
+* FIX: Invalid behaviors warning when installing plugin
+* FIX: Uninstalling plugin causes misleading missing dialog to popup
+* FIX: Installing plugins, loads new behaviors immediately
+* FIX: Open files from commandline that have whitespace
+* FIX: Styling for folding
+* FIX: Creating files under folders with '.' in name
+* FIX: Quote and link styling for default theme
+* FIX: Fat cursor not showing up when searching in default theme
+* FIX: Uncomment command respects line-comment-options behavior
+* FIX: Opening file from OSX file manager opens correct file
+* FIX: Width of inputs for renaming files in workspace tree
+* FIX: Detect latest plugin versions in plugin manager
+* ADDED: LT can be built from source with provided scripts across supported platforms
+* ADDED: Improved documentation - most core fns have docstrings, all namespaces have docstrings, [API docs](http://lighttable.github.io/LightTable/api/) and [developer docs](https://github.com/LightTable/LightTable/tree/master/doc)
+* ADDED: Most of LT's node libraries are installed as npm dependencies instead of as forked libraries
+* ADDED: Vector format support for workspace behaviors
+* ADDED: Open to line number from commandline e.g. `light FILE:LINE `
+* ADDED: commandline comes with improved --help
+* ADDED: `:lt.objs.editor/load-addon` behavior loads CodeMirror addons that [ship with LT](https://github.com/LightTable/LightTable/tree/master/deploy/core/node_modules/codemirror/addon)
+* ADDED: `:lt.objs.editor/set-rulers` behavior to set CodeMirror rulers - [screenshot](https://www.dropbox.com/s/ipq7c21w1dkwmg3/Screenshot%202015-01-24%2011.50.25.png?dl=0)
+* ADDED: Add file-type definitions for .feature, .rst and [many more](https://github.com/LightTable/LightTable/commit/a12dc47d78825897b9a7bdcfafa72525eb4949f7)
+* ADDED: Add F-11 keybinding for fullscreen
+* ADDED: Add pmeta-/ for toggle-comment
+* ADDED: Better error handling for download errors
+* ADDED: Block comment command
+* ADDED: Max length for autocompletion is configurable
+* ADDED: Plugins and settings menu items
+
+##0.7.2
+
+* FIX: Behavior ordering issue that caused plugin weirdness and menus disappearing (ibdknox)
+* FIX: allow single arity logs (one-more-minute)
+* FIX: changelog additions (cldwalker)
+
+##0.7.1
+
+* FIX: styling issues in the searcher
+* FIX: roll back to an older version of node-webkit as a result of freezing issues when compiling certain plugins
+* FIX: Give the auto-close keymap behavior a description: `Editor: auto-close parens/brackets/quotes/pairs`
+
+##0.7.0
+
+* CHANGED: Enter doesn't select a completion by default anymore, just tab. Add `[:editor.keys.hinting.active "-enter" [:passthrough]]` to your keymap get it back.
+* CHANGED: parens are not auto-closed by default anymore, add `[:app :lt.objs.settings/pair-keymap-diffs]` to your behaviors to get it back.
+* CHANGED: Move to the MIT License (one-more-minute)
+* CHANGED: Remove plugin server and use Github as the plugin-metadata repository (ibdknox)
+* CHANGED: New flat syntax for behaviors and keymaps that allows much better copying and pasting
+* CHANGED: Move all Light Table websites to Github pages
+* FIX: Linux run script portability (gruns)
+* FIX: Fix CodeMirror search failing with RegExp (blandinw)
+* FIX: Better websocket-based eval (ibdknox)
+* FIX: Allow custom colors for rainbow parens (Victor Cottin)
+* FIX: download via https (dkinzer)
+* FIX: editor conversion in the editor API (one-more-minute)
+* FIX: Note hotkeys for OSX (gekkoe)
+* FIX: Jump stack fixes (cldwalker)
+* FIX: diff ordering was slightly wrong (ibdknox)
+* FIX: prevent errors without lines from throwing (ibdknox)
+* FIX: show notifications for errors without editor locations (ibdknox)
+* FIX: emacs find fixes (joshuafcole)
+* FIX: fix connector failing to connect (mortalapeman)
+* FIX: use menu behaviors for all menus (ibdknox)
+* FIX: search no longer randomly searches on keyup/keydown (ibdknox)
+* FIX: prevent tab labels from leaking (ibdknox)
+* FIX: remove unused/non-existent behaviors (cldwalker)
+* FIX: remove all CLJS compiler warnings (brabadu cldwalker joshuafcole)
+* FIX: fix Haxe extension (cldwalker)
+* FIX: prevent the same folder/file from being added to the workspace twice (brabadu)
+* FIX: fix regexp replace (ibdknox)
+* FIX: lots of error reporting fixes (ibdknox cldwalker)
+* FIX: much better completion/helper interaction for behaviors and commands
+* README FIX: tons of readme updates (cldwalker)
+* ADDED: You can now open multiple copies of a single file (cldwalker)
+* ADDED: duplicate file action to workspace menu (seancaffery)
+* ADDED: when wrapping with parens, select the result (one-more-minute)
+* ADDED: copy exception menu item for inline exceptions (joshuafcole)
+* ADDED: copy support for the console (joshuafcole)
+* ADDED: menu for inline results (mortalapeman)
+* ADDED: show plugins directory in about tab (cldwalker)
+* ADDED: allow command shortcutting (ibdknox)
+* ADDED: `File: Open another view of current file` command
+* ADDED: indent-level aware backspace (one-more-minute)
+* ADDED: user plugin (cldwalker)
+* ADDED: `Settings: User script` command (cldwalker)
+* ADDED: Allow folding at a location (ndr-qef)
+* ADDED: auto convert old behaviors/keymaps to the flat syntax (cldwalker)
+* UPDATED: CodeMirror
+* UPDATED: Latest node-webkit
+
+##0.6.7
+
+* FIX: Workspace behaviors do not correctly take effect on startup (mortalapeman)
+* FIX: Focus issues that cause weird save/eval behavior. (ibdknox)
+* FIX: fix default theme issues (ibdknox & skrat)
+* FIX: Ignore drag events so that "null" doesn't get input into the editor
+* FIX: line ending preservation was broken #359 (ibdknox)
+* FIX: Clojure client couldn't be created from the add connection menu ibdknox
+* FIX: CSS save issue (ibdknox)
+* ADDED: proxy support via http_proxy and https_proxy env vars (sethyuan)
+* README FIX: default keybinding for the searcher on OSX (gekkie808)
+
+##0.6.6
+
+* FIX: combine try-read catches now that :default is available in cljs (cldwalker)
+* FIX: tweak show-docs command to open only one doc (snufkon)
+* FIX: update solarized (ccspell and gozala)
+* FIX: source map urls were not correctly encoded (nickgieschen)
+* FIX: Ignore case when sorting plugins (seancaffery)
+* FIX: Remove windowVerbatimArguments to fix pathing issues for processes on windows
+* FIX: Push the initial position onto the stack when jumping (joshuafcole)
+* FIX: remove warning from eclipse theme (Bost)
+* FIX: don't move the search forward after every keypress (jamii)
+* FIX: Prevent font settings from being unnecessarily updated (ibdknox)
+* ADDED: Multiple cursor commands from CM4
+* ADDED: Multiple fonts support (ykomatsu)
+* ADDED: reasonable default keybindings for zoom (cldwalker)
+* ADDED: select the previous search text when bringing up the searcher (Bost)
+* ADDED: Report bug button on welcome screen (Tyrieke Morton)
+* ADDED: `Editor: Set options for line commenting` behavior (cldwalker)
+* ADDED: you can right click to copy an inline result (cldwalker)
+* API: make tab and tabset menus extensible (mortalapeman)
+* API: log context changes (ndr-qef)
+* API: checks for required keys in commands (cldwalker)
+* API: add copy and paste platform functions (cldwalker)
+* API: open-path function (cldwalker)
+* API: Make $ and $$ multi-arity (mortalapeman)
+* API: editor.add-gutter and remove-gutter functions (seancaffery)
+* UPDATED: CodeMirror 4!
+* UPDATED: CodeMirror modes
+
+##0.6.5
+
+* FIX: Less syntax highlighting would cause errors
+* FIX: Show update button below uninstall button in the plugin manager (mark.fisher)
+* FIX: better cljs errors in external browser connections
+* FIX: php syntax highlighting was set incorrectly (flaviozantut)
+* FIX: Evaling CSS into LT UI fails
+* FIX: remove the alt-# keybindings as it screws up international keyboards
+* FIX: rewrite sourceMappingURL with full path (nickgieschen)
+* FIX: on OSX chorded shortcuts were being intercepted by the menus (e.g. ctrl-f)
+* FIX: change cursor to pointer in the plugin manager (seancaffrey)
+* FIX: prevent opening multiple console tabs  (spelufo)
+* FIX: add ellipsis to truncated inline results (ndr-qef)
+* FIX: remove last remaining refs to light-table-core (cldwalker)
+* FIX: add common lisp extension (patrickconnelly)
+* FIX: focusing the url bar in the internal browser selects the url (Curtis Rasmussen)
+* FIX: find/replace with '(' now works
+* ADDED: `Plugins: Update all outdated` command (ndr-qef)
+* ADDED: Searcher picks up your selection by default (snufkon)
+* ADDED: `Navigate: set maximum number of indexed files` behavior (ndr-qef)
+* ADDED: `Tab: Move tab to new tabset` command and context menu item (snufkon)
+* ADDED: `Tabs: Close tabs except current tab` command (snufkon)
+* ADDED: a close tab button on hover of tabs (Tyrieke Morton)
+* ADDED: `Tabs: Close all tabs` command (piyushi0101)
+* ADDED: Plugins now check for missing deps on startup allowing you to use the dependencies key of a personal plugin as your "dotfiles"
+* ADDED: `Plugins: Ignore cache and force reload the current behaviors file` command for plugin development
+* ADDED: close tab with middle/cmd+click (seancaffery)
+* ADDED: `App: Set the default zoom level` behavior for hidpi
+* ADDED: leiningen directions to readme (statesside)
+* API: allow editor/adjust-loc to specify line movement (ndr-qef)
+* API: added `trigger` to `:object.behavior.time` event for complete event introspection
+* API: added object/assoc-in! (ndr-qef)
+
+##0.6.4
+
+* FIX: plugins would sometimes fail to install due to bad tar headers
+* UPDATED: Move to npm-tar 0.1.19
+
 ##0.6.3
 
-* FIX: plugins now load correctly when installed
+* FIX: Remove use of the removed `thread` macro (MarcoPolo)
+* FIX: Tabsets don't properly resize after being removed (Morgawr)
+* FIX: handle non-dommable errors better (e.g. you throw an object)
+* FIX: Matching bracket highlighting for tomorrow-night theme (chmllr)
+* FIX: don't let line-height 0 destroy the editor (Morgawr)
+* FIX: plugins no longer require a restart
 * FIX: when user-dir and core contain the same plugin version, choose user-dir first
+* FIX: copy over platform specific dir for mac build (mark.fisher)
+* FIX: show an error of sourcing for the path fails on OSX (ndr-qef)
+* FIX: select-all now correctly includes the first line (mihneadb)
+* FIX: check for curl in the linux build script (mihneadb)
+* CHANGE: behaviors that have been removed with :- will guarantee that the behavior is not applied to anything with that tag.
+* ADDED: You can remove recent workspaces (mortalapeman)
+* ADDED: paths like foo.html.erb are now correctly interpreted as their file type
+* ADDED: notifications can now be set with custom timeouts (ndr-qef)
+* ADDED: pmeta-9 and alt-9 now go to the last tab (mihneadb)
+* ADDED: Using auto-pairing with a selection now wraps the selection in the pair (ThePawnBreak)
+* ADDED: Suggest an extension in the save-as dialog (ndr-qef)
+* ADDED: Support alt-# tab switching (mihneadb)
+* UPDATED: Move to wrench 1.5.6 (heyLu)
 
 ##0.6.2
 

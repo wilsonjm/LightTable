@@ -1,4 +1,5 @@
 (ns lt.objs.style
+  "Provide styling behaviors, themes and skins"
   (:require [lt.object :as object]
             [lt.objs.sidebar.command :as cmd]
             [lt.objs.app :as app]
@@ -12,7 +13,8 @@
             [lt.util.dom :as dom]
             [lt.util.load :as load]
             [crate.binding :refer [bound -value subatom]]
-            [crate.compiler :refer [dom-attr]])
+            [crate.compiler :refer [dom-attr]]
+            [clojure.string :as string])
   (:require-macros [lt.macros :refer [behavior defui]]))
 
 (defn css-expr [k v]
@@ -21,12 +23,17 @@
 (defn selector [sel & body]
   (str sel " { " (apply str body) " }"))
 
+(defn str-font-family [x]
+  (if (vector? x)
+    (string/join ", " (map pr-str x))
+    (pr-str x)))
+
 (defn ->css [settings]
   (selector ".CodeMirror"
             (when (:line-height settings)
               (css-expr :line-height (str (:line-height settings) "em")))
             (when (:font-family settings)
-              (css-expr :font-family (pr-str (:font-family settings))))
+              (css-expr :font-family (str-font-family (:font-family settings))))
             (when (:font-size settings)
               (css-expr :font-size (str (:font-size settings) "pt")))))
 
@@ -34,38 +41,39 @@
                 :init (fn [this]
                         [:div
                          [:style {:type "text/css"}
-                          (bound this ->css)
+                          (bound (subatom this :font-settings) ->css)
                           ]]))
 
 (def styles (object/create ::styles
                            :theme "default"))
 
 (behavior ::style-on-init
-                  :triggers #{:init}
-                  :reaction (fn [app]
-                              (dom/append (dom/$ :head) (:content @styles))
-                              ))
+          :triggers #{:init}
+          :reaction (fn [app]
+                      (dom/append (dom/$ :head) (:content @styles))
+                      ))
 
 (behavior ::font-settings
-                  :desc "Editor: Font settings"
-                  :params [{:label "Font family"
-                            :type :string}
-                           {:label "Size (pt)"
-                            :type :number}
-                           {:label "Line height (em)"
-                            :type :number}]
-                  :type :user
-                  :exclusive true
-                  :triggers #{:object.instant}
-                  :reaction (fn [this family size line-height]
-                              (let [final {:font-family family}
-                                    final (if size
-                                            (assoc final :font-size size)
-                                            final)
-                                    final (if line-height
-                                            (assoc final :line-height line-height)
-                                            final)]
-                                (object/merge! styles final))))
+          :desc "App: Font settings"
+          :params [{:label "Font family"
+                    :type :string}
+                   {:label "Size (pt)"
+                    :type :number}
+                   {:label "Line height (em)"
+                    :type :number}]
+          :type :user
+          :exclusive true
+          :triggers #{:object.instant}
+          :reaction (fn [this family size line-height]
+                      (let [final {:font-family family}
+                            final (if size
+                                    (assoc final :font-size size)
+                                    final)
+                            final (if (and line-height
+                                           (> line-height 0))
+                                    (assoc final :line-height line-height)
+                                    final)]
+                        (object/merge! styles {:font-settings final}))))
 
 ;;**********************************************************
 ;; Skins
@@ -92,25 +100,23 @@
            (for [[skin path] (object/raise-reduce app/app :skins+ {})]
               #js {:text (pr-str skin) :completion (pr-str skin)})))
 
-(get-skins)
-
 (behavior ::set-skin
-                  :triggers #{:object.instant}
-                  :desc "Style: Set Light Table skin"
-                  :params [{:label "skin"
-                            :type :list
-                            :items get-skins}]
-                  :type :user
-                  :reaction (fn [this skin]
-                              (inject-skin skin)))
+          :triggers #{:object.instant}
+          :desc "Style: Set Light Table skin"
+          :params [{:label "skin"
+                    :type :list
+                    :items get-skins}]
+          :type :user
+          :reaction (fn [this skin]
+                      (inject-skin skin)))
 
 (behavior ::provide-skin
-                  :desc "Style: Provide skin"
-                  :triggers #{:skins+}
-                  :type :user
-                  :params [{:label "name"} {:label "path"}]
-                  :reaction (fn [this skins name path]
-                              (assoc skins name (plugins/adjust-path path))))
+          :desc "Style: Provide skin"
+          :triggers #{:skins+}
+          :type :user
+          :params [{:label "name"} {:label "path"}]
+          :reaction (fn [this skins name path]
+                      (assoc skins name (plugins/adjust-path path))))
 
 ;;**********************************************************
 ;; themes
@@ -138,12 +144,12 @@
 
 
 (behavior ::provide-theme
-                  :desc "Style: Provide editor theme"
-                  :triggers #{:themes+}
-                  :type :user
-                  :params [{:label "name"} {:label "path"}]
-                  :reaction (fn [this themes name path]
-                              (assoc themes name (plugins/adjust-path path))))
+          :desc "Style: Provide editor theme"
+          :triggers #{:themes+}
+          :type :user
+          :params [{:label "name"} {:label "path"}]
+          :reaction (fn [this themes name path]
+                      (assoc themes name (plugins/adjust-path path))))
 
 (behavior ::remove-theme
           :triggers #{:deactivated :destroy}
@@ -154,13 +160,13 @@
 
 
 (behavior ::set-theme
-                  :triggers #{:object.instant :show}
-                  :desc "Style: Set the editor theme"
-                  :params [{:label "theme"
-                            :type :list
-                            :items get-themes}]
-                  :type :user
-                  :exclusive true
-                  :reaction (fn [this sel]
-                              (inject-theme sel)
-                              (editor/set-options this {:theme sel})))
+          :triggers #{:object.instant :show}
+          :desc "Style: Set the editor theme"
+          :params [{:label "theme"
+                    :type :list
+                    :items get-themes}]
+          :type :user
+          :exclusive true
+          :reaction (fn [this sel]
+                      (inject-theme sel)
+                      (editor/set-options this {:theme sel})))

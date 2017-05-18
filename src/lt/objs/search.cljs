@@ -1,4 +1,5 @@
 (ns lt.objs.search
+  "Provide search and replace functionality across files"
   (:require [lt.object :as object]
             [lt.objs.proc :as proc]
             [lt.objs.tabs :as tabs]
@@ -14,7 +15,9 @@
             [crate.binding :refer [computed bound]]
             [lt.util.js :refer [wait now]]
             [lt.util.load :as load]
-            [clojure.string :as string])
+            [clojure.string :as string]
+            [lt.objs.editor :as editor]
+            [lt.objs.editor.pool :as pool])
   (:require-macros [lt.macros :refer [behavior defui extract foreach background]]))
 
 (def search! (background (fn [obj-id opts]
@@ -57,7 +60,7 @@
   [:p.entry (crate/raw (str "<span class='line'>" (.-line r) "</span><pre>" (.-text r) "</pre>"))]
   :click (fn []
            (cmd/exec! :open-path file)
-           (cmd/exec! :goto-line (.-line r))))
+           (cmd/exec! :go-to-line (.-line r))))
 
 (defui ->result-item [r]
   (let [file (.-file r)]
@@ -69,7 +72,9 @@
 (defui search-box [this]
   [:input.search {:type "text" :placeholder "Search"}]
   :focus (fn []
-           (ctx/in! :searcher.search this))
+           (ctx/in! :searcher.search this)
+           ; select the text automatically pasted to input line for some UI conveniece
+           (.select (dom/$ :input.search (object/->content this))))
   :blur (fn []
           (ctx/out! :searcher.search)))
 
@@ -81,7 +86,7 @@
           (ctx/out! :searcher.replace)))
 
 (defui replace-all-button [this]
-  [:button.replace "all"]
+  [:button.replace "Replace All"]
   :click (fn [e]
            (cmd/exec! :searcher.replace-all)))
 
@@ -114,9 +119,9 @@
 
 (behavior ::search!
           :triggers #{:search!}
-          :reaction (fn [this]
+          :reaction (fn [this search-info]
                       (object/raise this :clear!)
-                      (let [info (->search-info this)]
+                      (let [info (or search-info (->search-info this))]
                         (when-not (empty? (:search info))
                           (object/merge! this info)
                           (notifos/working "Searching workspace...")
@@ -163,7 +168,7 @@
                               neue (aget all file)]
                           (object/merge! this {:position [file result]})
                           (cmd/exec! :open-path (.-file neue))
-                          (cmd/exec! :goto-line (-> (.-results neue)
+                          (cmd/exec! :go-to-line (-> (.-results neue)
                                                     (aget result)
                                                     (.-line)))))))
 
@@ -186,7 +191,7 @@
                               neue (aget (:results @this) file)]
                           (object/merge! this {:position [file result]})
                           (cmd/exec! :open-path (.-file neue))
-                          (cmd/exec! :goto-line (-> (.-results neue)
+                          (cmd/exec! :go-to-line (-> (.-results neue)
                                                     (aget result)
                                                     (.-line)))))))
 (behavior ::on-result
@@ -230,11 +235,13 @@
                          [:div.searcher
                           [:p (bound this result-count)]
                           (search-box this)
-                          [:div (replace-box this) (replace-all-button)]
+                          [:div (replace-box this) (replace-all-button this)]
                           (location-box this)
                           ]
                          ]
                         ))
+
+(def searcher (object/create ::workspace-search))
 
 (cmd/command {:command :searcher.search
               :desc "Searcher: Execute search"
@@ -246,6 +253,11 @@
 (cmd/command {:command :searcher.show
               :desc "Searcher: Show"
               :exec (fn []
+                      (when-let [e (pool/last-active)]
+                        (when-let [sel (editor/selection e)]
+                          (when-not (string/blank? sel)
+                            (let [search (dom/$ :.search (object/->content searcher))]
+                              (dom/val search sel)))))
                       (tabs/add-or-focus! searcher))})
 
 (cmd/command {:command :searcher.next
@@ -263,5 +275,3 @@
               :hidden true
               :exec (fn []
                       (object/raise searcher :replace!))})
-
-(def searcher (object/create ::workspace-search))

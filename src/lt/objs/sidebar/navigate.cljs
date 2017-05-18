@@ -1,4 +1,5 @@
 (ns lt.objs.sidebar.navigate
+  "Provide sidebar for finding and opening files"
   (:require [lt.object :as object]
             [lt.objs.workspace :as workspace]
             [lt.objs.context :as ctx]
@@ -9,8 +10,8 @@
             [lt.objs.opener :as opener]
             [lt.objs.sidebar :as sidebar]
             [lt.util.dom :as dom]
+            [lt.objs.thread]
             [lt.util.load :as load]
-            [lt.util.cljs :as cljs-util]
             [crate.core :as crate]
             [crate.binding :refer [bound subatom]])
   (:require-macros [lt.macros :refer [behavior defui background]]))
@@ -19,19 +20,14 @@
 (defn file-filters [f]
   (re-seq files/ignore-pattern f))
 
-(defn populate [ws]
-  (let [files (reduce grab-files [] (:folders ws))
-        fs (map #(do {:full % :rel (files/basename %)}) (:files ws))]
-    (vec (filter #(files/file? (:full %)) (remove #(-> % :rel file-filters) (concat files fs))))))
-
-(def populate-bg (background (fn [obj-id {:keys [ws pattern]}]
+(def populate-bg (background (fn [obj-id {:keys [lim pattern ws]}]
                                (let [fs (js/require "fs")
                                      fpath (js/require "path")
                                      walkdir (js/require (str js/ltpath "/core/node_modules/lighttable/background/walkdir2.js"))
                                      grab-files (fn [all-files folder]
                                                   (let [root-length (inc (count (.dirname fpath folder)))
                                                         walked (walkdir folder (js-obj "filter" (js/RegExp. pattern)
-                                                                                        "limit" 8000))]
+                                                                                        "limit" lim))]
                                                     (.concat all-files (.map (.-paths walked)
                                                                              #(js-obj "full" %
                                                                                       "rel" (subs % root-length))))))
@@ -41,62 +37,74 @@
                                  (js/_send obj-id :workspace-files final)
                                  ))))
 
+(declare sidebar-navigate)
+
 (behavior ::workspace-files
-                  :triggers #{:workspace-files}
-                  :reaction (fn [this files]
-                              (object/merge! this {:files (cljs-util/js->clj files :keywordize-keys true)})
-                              (object/raise (:filter-list @this) :refresh!)
-                              ))
+          :triggers #{:workspace-files}
+          :reaction (fn [this files]
+                      (object/merge! this {:files (js->clj files :keywordize-keys true)})
+                      (object/raise (:filter-list @this) :refresh!)
+                      ))
 
 (behavior ::populate-on-ws-update
-                  :triggers #{:updated :refresh}
-                  :debounce 150
-                  :reaction (fn [ws]
-                              (populate-bg sidebar-navigate {:pattern (.-source files/ignore-pattern)
-                                                             :ws (workspace/serialize @ws)})))
+          :triggers #{:updated :refresh}
+          :debounce 150
+          :reaction (fn [ws]
+                      (populate-bg sidebar-navigate {:lim (dec (:file-limit @sidebar-navigate))
+                                                     :pattern (.-source files/ignore-pattern)
+                                                     :ws (workspace/serialize @ws)})))
 
 (behavior ::watched.create
-                  :triggers #{:watched.create}
-                  :reaction (fn [ws path]
-                              (when-not (file-filters (files/basename path))
-                                (let [ws-parent (files/parent (first (filter #(= 0 (.indexOf path %)) (:folders @ws))))
-                                      rel-length (inc (count ws-parent))]
-                                  (object/update! sidebar-navigate [:files] conj {:full path :rel (subs path rel-length)})
-                                  (object/raise (:filter-list @sidebar-navigate) :refresh!)))))
+          :triggers #{:watched.create}
+          :reaction (fn [ws path]
+                      (when-not (file-filters (files/basename path))
+                        (let [ws-parent (files/parent (first (filter #(= 0 (.indexOf path %)) (:folders @ws))))
+                              rel-length (inc (count ws-parent))]
+                          (object/update! sidebar-navigate [:files] conj {:full path :rel (subs path rel-length)})
+                          (object/raise (:filter-list @sidebar-navigate) :refresh!)))))
 
 (behavior ::watched.delete
-                  :triggers #{:watched.delete}
-                  :reaction (fn [ws path]
-                              ;;TODO: this is terribly inefficient
-                              (object/update! sidebar-navigate [:files] #(remove (fn [x] (= 0 (.indexOf (:full x) path))) %))
-                              (object/raise (:filter-list @sidebar-navigate) :refresh!)))
+          :triggers #{:watched.delete}
+          :reaction (fn [ws path]
+                      ;;TODO: this is terribly inefficient
+                      (object/update! sidebar-navigate [:files] #(remove (fn [x] (= 0 (.indexOf (:full x) path))) %))
+                      (object/raise (:filter-list @sidebar-navigate) :refresh!)))
 
 (behavior ::focus!
-                  :triggers #{:focus!}
-                  :reaction (fn [this]
-                              (object/raise (:filter-list @this) :focus!)
-                              ))
+          :triggers #{:focus!}
+          :reaction (fn [this]
+                      (object/raise (:filter-list @this) :focus!)
+                      ))
 
 (behavior ::focus-on-show
-                  :triggers #{:show}
-                  :reaction (fn [this]
-                              (object/raise this :focus!)))
+          :triggers #{:show}
+          :reaction (fn [this]
+                      (object/raise this :focus!)))
 
 (behavior ::open-on-select
-                  :triggers #{:select}
-                  :reaction (fn [this cur]
-                              (object/raise opener/opener :open! (:full cur))))
+          :triggers #{:select}
+          :reaction (fn [this cur]
+                      (object/raise opener/opener :open! (:full cur))))
 
 (behavior ::escape!
-                  :triggers #{:escape!}
-                  :reaction (fn [this]
-                              (cmd/exec! :escape-navigate)
-                              (cmd/exec! :focus-last-editor)))
+          :triggers #{:escape!}
+          :reaction (fn [this]
+                      (cmd/exec! :escape-navigate)
+                      (cmd/exec! :focus-last-editor)))
 
 (behavior ::pop-transient-on-select
-                  :triggers #{:selected}
-                  :reaction (fn [this]
-                              (object/raise sidebar/rightbar :close!)))
+          :triggers #{:selected}
+          :reaction (fn [this]
+                      (object/raise sidebar/rightbar :close!)))
+
+(behavior ::set-file-limit
+          :triggers #{:object.instant}
+          :type :user
+          :desc "Navigate: set maximum number of indexed files"
+          :params [{:label "Number"
+                    :example 8000}]
+          :reaction (fn [this n]
+                      (object/merge! this {:file-limit n})))
 
 (object/object* ::sidebar.navigate
                 :tags #{:navigator}
@@ -104,6 +112,7 @@
                 :order -3
                 :selected 0
                 :files []
+                :file-limit 8000
                 :search ""
                 :init (fn [this]
                         (let [list (cmd/filter-list {:key :rel

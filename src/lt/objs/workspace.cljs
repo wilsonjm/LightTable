@@ -1,13 +1,16 @@
 (ns lt.objs.workspace
+  "Provide workspace object and associated behaviors"
   (:require [lt.object :as object]
             [lt.objs.app :as app]
             [lt.objs.files :as files]
             [lt.objs.command :as cmd]
             [lt.objs.cache :as cache]
+            [lt.objs.notifos :as notifos]
+            [lt.objs.console :as console]
             [cljs.reader :as reader]
             [lt.util.load :as load]
             [lt.util.js :refer [now]]
-            [lt.util.cljs :refer [->dottedkw js->clj]])
+            [lt.util.cljs :refer [->dottedkw]])
   (:require-macros [lt.macros :refer [behavior]]))
 
 ;;*********************************************************
@@ -18,6 +21,17 @@
 (def fs (js/require "fs"))
 (def max-depth 10)
 (def watch-interval 1000)
+
+(object/object* ::workspace
+                :tags #{:workspace}
+                :files []
+                :folders []
+                :watches {}
+                :ws-behaviors ""
+                :init (fn [this]
+                        nil))
+
+(def current-ws (object/create ::workspace))
 
 (defn unwatch [watches path recursive?]
   (when watches
@@ -30,6 +44,11 @@
         ((:close r)))
       (apply dissoc watches removes))))
 
+(defn unwatch!
+  ([path] (unwatch! path false))
+  ([path recursive?]
+   (object/merge! current-ws {:watches (unwatch (:watches @current-ws) path recursive?)})))
+
 (defn alert-file [path]
   (fn [cur prev]
     (if (.existsSync fs path)
@@ -39,21 +58,6 @@
         (unwatch! path)
         (object/raise current-ws :watched.delete path)))))
 
-(defn alert-folder [path]
-  (fn [cur prev]
-    (if (.existsSync fs path)
-      (do
-        (let [watches (:watches @current-ws)
-              neue (first (filter #(and (not (get watches %))
-                                        (not (re-seq files/ignore-pattern %)))
-                                  (files/full-path-ls path)))]
-          (when neue
-            (watch! neue)
-            (object/raise current-ws :watched.create neue (.statSync fs neue)))))
-      (do
-        (unwatch! path :recursive)
-        (object/raise current-ws :watched.delete path)))))
-
 (defn file->watch [path]
   (let [alert (alert-file path)]
     {:path path
@@ -61,12 +65,7 @@
      :close (fn []
               (.unwatchFile fs path alert))}))
 
-(defn folder->watch [path]
-  (let [alert (alert-folder path)]
-     {:path path
-      :alert alert
-      :close (fn []
-              (.unwatchFile fs path alert))}))
+(declare folder->watch)
 
 (defn watch!
   ([path] (watch! (transient {}) path nil))
@@ -99,8 +98,27 @@
      (when-not (number? recursive?)
        (object/update! current-ws [:watches] merge (persistent! results)))))
 
-(defn unwatch! [path recursive?]
-  (object/merge! current-ws {:watches (unwatch (:watches @current-ws) path recursive?)}))
+(defn alert-folder [path]
+  (fn [cur prev]
+    (if (.existsSync fs path)
+      (do
+        (let [watches (:watches @current-ws)
+              neue (first (filter #(and (not (get watches %))
+                                        (not (re-seq files/ignore-pattern %)))
+                                  (files/full-path-ls path)))]
+          (when neue
+            (watch! neue)
+            (object/raise current-ws :watched.create neue (.statSync fs neue)))))
+      (do
+        (unwatch! path :recursive)
+        (object/raise current-ws :watched.delete path)))))
+
+(defn folder->watch [path]
+  (let [alert (alert-folder path)]
+     {:path path
+      :alert alert
+      :close (fn []
+              (.unwatchFile fs path alert))}))
 
 (defn stop-watching [ws]
   (unwatch! (keys (:watches @ws))))
@@ -144,6 +162,16 @@
 (defn new-cached-file []
   (str (now) ".clj"))
 
+(defn file->ws [file]
+  (-> (files/open-sync file)
+      (:content)
+      (reader/read-string)
+      (assoc :path file)))
+
+(defn save [ws file]
+  (files/save (files/join workspace-cache-path file) (pr-str (serialize @ws)))
+  (object/raise ws :save))
+
 (defn open [ws file]
   (let [loc (if-not (> (.indexOf file files/separator) -1)
               (files/join workspace-cache-path file)
@@ -153,21 +181,11 @@
       (reconstitute ws (file->ws loc))
       (save ws (:file @ws))
       (files/delete! loc)
-      (catch js/Error e
-        ))))
-
-(defn save [ws file]
-  (files/save (files/join workspace-cache-path file) (pr-str (serialize @ws)))
-  (object/raise ws :save))
+      (catch :default e
+        (console/error e)))))
 
 (defn cached []
   (filter #(> (.indexOf % ".clj") -1) (files/full-path-ls workspace-cache-path)))
-
-(defn file->ws [file]
-  (-> (files/open-sync file)
-      (:content)
-      (reader/read-string)
-      (assoc :path file)))
 
 (defn all []
   (let [fs (sort > (cached))]
@@ -181,112 +199,107 @@
            (seq (:folders @ws)))))
 
 (behavior ::serialize-workspace
-                  :triggers #{:updated :serialize!}
-                  :reaction (fn [this]
-                              (when-not (@this :file)
-                                (object/merge! this {:file (new-cached-file)}))
-                              (when (and (@this :initialized?)
-                                         (not (ws-empty? this)))
-                                (save this (:file @this)))))
+          :triggers #{:updated :serialize!}
+          :reaction (fn [this]
+                      (when-not (@this :file)
+                        (object/merge! this {:file (new-cached-file)}))
+                      (when (and (@this :initialized?)
+                                 (not (ws-empty? this)))
+                        (save this (:file @this)))))
 
 (behavior ::reconstitute-last-workspace
-                  :triggers #{:post-init}
-                  :reaction (fn [app]
-                              (when (and (= (app/window-number) 0)
-                                         (not (:initialized @current-ws)))
-                                (when-let [ws (first (all))]
-                                  (open current-ws (-> ws :path (files/basename))))) ;;for backwards compat
-                              (object/merge! current-ws {:initialized? true})))
+          :triggers #{:post-init}
+          :reaction (fn [app]
+                      (when (and (app/first-window?)
+                                 (not (:initialized @current-ws)))
+                        (when-let [ws (first (all))]
+                          (open current-ws (-> ws :path (files/basename))))) ;;for backwards compat
+                      (object/merge! current-ws {:initialized? true})))
 
 (behavior ::new!
-                  :triggers #{:new!}
-                  :reaction (fn [this]
-                              (object/merge! this {:file (new-cached-file)})
-                              (object/raise this :clear!)))
+          :triggers #{:new!}
+          :reaction (fn [this]
+                      (object/merge! this {:file (new-cached-file)})
+                      (object/raise this :clear!)))
 
 (behavior ::add-file!
-                  :triggers #{:add.file!}
-                  :reaction (fn [this f]
-                              (add! this :files f)
-                              (object/raise this :add f)
-                              (object/raise this :updated)))
+          :triggers #{:add.file!}
+          :reaction (fn [this f]
+                      (if-not (contains? (set (:files @this)) f)
+                        (do
+                          (add! this :files f)
+                          (object/raise this :add f)
+                          (object/raise this :updated))
+                        (notifos/set-msg! "This file is already in your workspace." {:class "error"}))))
 
 (behavior ::add-folder!
-                  :triggers #{:add.folder!}
-                  :reaction (fn [this f]
-                              (add! this :folders f)
-                              (object/raise this :add f)
-                              (object/raise this :updated)))
+          :triggers #{:add.folder!}
+          :reaction (fn [this f]
+                      (if-not (contains? (set (:folders @this)) f)
+                        (do
+                          (add! this :folders f)
+                          (object/raise this :add f)
+                          (object/raise this :updated))
+                        (notifos/set-msg! "This folder is already in your workspace." {:class "error"}))))
 
 (behavior ::remove-file!
-                  :triggers #{:remove.file!}
-                  :reaction (fn [this f]
-                              (remove! this :files f)
-                              (object/raise this :remove f)
-                              (object/raise this :updated)))
+          :triggers #{:remove.file!}
+          :reaction (fn [this f]
+                      (remove! this :files f)
+                      (object/raise this :remove f)
+                      (object/raise this :updated)))
 
 (behavior ::remove-folder!
-                  :triggers #{:remove.folder!}
-                  :reaction (fn [this f]
-                              (remove! this :folders f)
-                              (object/raise this :remove f)
-                              (object/raise this :updated)))
+          :triggers #{:remove.folder!}
+          :reaction (fn [this f]
+                      (remove! this :folders f)
+                      (object/raise this :remove f)
+                      (object/raise this :updated)))
 
 (behavior ::rename!
-                  :triggers #{:rename!}
-                  :reaction (fn [this f neue]
-                              (let [key (if (files/file? f)
-                                          :files
-                                          :folders)]
-                                (remove! this key f)
-                                (add! this key neue)
-                                (object/raise this :rename f neue)
-                                (object/raise this :updated))))
+          :triggers #{:rename!}
+          :reaction (fn [this f neue]
+                      (let [key (if (files/file? f)
+                                  :files
+                                  :folders)]
+                        (remove! this key f)
+                        (add! this key neue)
+                        (object/raise this :rename f neue)
+                        (object/raise this :updated))))
 
 (behavior ::clear!
-                  :triggers #{:clear!}
-                  :reaction (fn [this]
-                              (let [old @this]
-                                (object/merge! this {:files []
-                                                     :folders []
-                                                     :ws-behaviors ""})
-                                (object/raise this :set old)
-                                (object/raise this :updated))))
+          :triggers #{:clear!}
+          :reaction (fn [this]
+                      (let [old @this]
+                        (object/merge! this {:files []
+                                             :folders []
+                                             :ws-behaviors ""})
+                        (object/raise this :set old)
+                        (object/raise this :updated))))
 
 (behavior ::set!
-                  :triggers #{:set!}
-                  :reaction (fn [this fs]
-                              (let [old @this]
-                                (object/merge! this fs)
-                                (object/raise this :set old)
-                                (object/raise this :updated))))
+          :triggers #{:set!}
+          :reaction (fn [this fs]
+                      (let [old @this]
+                        (object/merge! this fs)
+                        (object/raise this :set old)
+                        (object/raise this :updated))))
 
 (behavior ::watch-on-set
-                  :triggers #{:set}
-                  :reaction (fn [this]
-                              (watch-workspace this)))
+          :triggers #{:set}
+          :reaction (fn [this]
+                      (watch-workspace this)))
 
 (behavior ::stop-watch-on-close
-                  :triggers #{:close :refresh}
-                  :reaction (fn [app]
-                              (stop-watching current-ws)))
+          :triggers #{:close :refresh}
+          :reaction (fn [app]
+                      (stop-watching current-ws)))
 
 (behavior ::init-workspace-cache-dir
           :triggers #{:init}
           :reaction (fn [app]
                       (when-not (files/exists? workspace-cache-path)
                         (files/mkdir workspace-cache-path))))
-
-(object/object* ::workspace
-                :tags #{:workspace}
-                :files []
-                :folders []
-                :watches {}
-                :ws-behaviors ""
-                :init (fn [this]
-                        nil))
-
-(def current-ws (object/create ::workspace))
 
 (cmd/command {:command :workspace.new
               :desc "Workspace: Create new workspace"

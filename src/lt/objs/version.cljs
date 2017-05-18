@@ -1,4 +1,5 @@
 (ns lt.objs.version
+  "Provide LT version command"
   (:require [lt.object :as object]
             [lt.objs.sidebar.command :as cmd]
             [lt.objs.opener :as opener]
@@ -15,15 +16,15 @@
                 (deploy/check-version true)))
 
 (behavior ::on-show-refresh-eds
-                  :triggers #{:show}
-                  :reaction (fn [this]
-                              (object/raise (:ed @this) :show)
-                              ))
+          :triggers #{:show}
+          :reaction (fn [this]
+                      (object/raise (:ed @this) :show)
+                      ))
 
 (behavior ::destroy-on-close
-                  :triggers #{:close}
-                  :reaction (fn [this]
-                              (object/destroy! this)))
+          :triggers #{:close}
+          :reaction (fn [this]
+                      (object/destroy! this)))
 
 (object/object* ::version-pane
                 :tags #{:version}
@@ -38,6 +39,7 @@
                             [:dl
                              [:dt "Light Table version"] [:dd (:version deploy/version)]
                              [:dt "Binary version"] [:dd (deploy/binary-version)]
+                             [:dt "Plugins directory" [:dd (files/lt-user-dir "plugins")]]
                              ]
                             (check-button)
                             ]
